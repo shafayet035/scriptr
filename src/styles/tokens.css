@@ -1,0 +1,81 @@
+/* Design tokens — Figma "01 · Foundations" variables.
+   Status colour is the app's primary signal: use --status-* identically everywhere. */
+:root {
+  /* backgrounds */
+  --bg-canvas: #0b0d10;
+  --bg-terminal: #07090b;
+  --bg-rail: #101317;
+  --bg-overlay: #11151a;
+  --bg-sidebar: #14181d;
+  --bg-surface: #191d23;
+  --bg-raised: #20252c;
+
+  /* borders */
+  --border-subtle: #22272e;
+  --border-default: #2e353e;
+  --border-strong: #3c4550;
+  --edge: #4a5561;
+
+  /* text */
+  --text-primary: #e8ecf2;
+  --text-secondary: #98a2b0;
+  --text-muted: #646f7d;
+  --text-inverse: #0b0d10;
+
+  /* accent */
+  --accent: #4f8cff;
+  --accent-subtle: #1b2740;
+
+  /* status */
+  --status-running: #3fd07a;
+  --status-running-subtle: #12301f;
+  --status-starting: #e3b341;
+  --status-starting-subtle: #33280f;
+  --status-queued: #b48cff;
+  --status-queued-subtle: #2a2140;
+  --status-crashed: #ff6b6b;
+  --status-crashed-subtle: #3a1717;
+  --status-stopped: #6b7684;
+
+  /* terminal palette */
+  --term-fg: #c9d1d9;
+  --term-dim: #6e7681;
+  --term-green: #7ee787;
+  --term-yellow: #e3b341;
+  --term-blue: #79c0ff;
+  --term-cyan: #56d4dd;
+  --term-red: #ff7b72;
+  --term-magenta: #d2a8ff;
+
+  /* type — system UI font replaces Inter (native feel); mono stays JetBrains Mono */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* layout */
+  --titlebar-h: 40px;
+  --sidebar-w: 256px;
+  --toolbar-h: 58px;
+  --tabbar-h: 38px;
+  --commandbar-h: 34px;
+  --statusbar-h: 28px;
+  --inspector-w: 340px;
+}
+
+/* Type ramp (Figma text styles) */
+.t-display-20 { font: 600 20px/28px var(--font-ui); letter-spacing: -0.2px; }
+.t-heading-15 { font: 600 15px/22px var(--font-ui); letter-spacing: -0.1px; }
+.t-title-13 { font: 600 13px/18px var(--font-ui); }
+.t-body-13 { font: 400 13px/20px var(--font-ui); }
+.t-body-12 { font: 400 12px/18px var(--font-ui); }
+.t-medium-12 { font: 500 12px/18px var(--font-ui); }
+.t-caption-11 { font: 400 11px/16px var(--font-ui); }
+.t-label-caps { font: 600 11px/14px var(--font-ui); letter-spacing: 0.7px; text-transform: uppercase; }
+.t-mono-11 { font: 400 11px/17px var(--font-mono); }
+.t-mono-12 { font: 400 12px/19px var(--font-mono); }
+
+.c-primary { color: var(--text-primary); }
+.c-secondary { color: var(--text-secondary); }
+.c-muted { color: var(--text-muted); }
+.c-accent { color: var(--accent); }
+.c-running { color: var(--status-running); }
+.c-crashed { color: var(--status-crashed); }

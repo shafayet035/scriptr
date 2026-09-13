@@ -1,0 +1,28 @@
+# dependencies
+node_modules/
+
+# frontend build
+dist/
+*.tsbuildinfo
+
+# rust / tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# local tooling
+.claude/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# logs & os noise
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db

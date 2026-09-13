@@ -1,0 +1,43 @@
+[package]
+name = "scriptr"
+version = "0.1.0"
+description = "Start, stop and watch the processes a project needs"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/shafayet035/scriptr"
+
+[lib]
+name = "scriptr_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = ["macos-private-api"] }
+tauri-plugin-dialog = "2.7"
+tauri-plugin-opener = "2.5"
+tauri-plugin-single-instance = "2.4"
+tauri-plugin-window-state = "2.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+portable-pty = "0.9"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+regex = "1"
+sysinfo = "0.37"
+notify = "8"
+dirs = "6"
+uuid = { version = "1", features = ["v4"] }
+log = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["signal", "process"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
