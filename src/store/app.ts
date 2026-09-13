@@ -43,7 +43,12 @@ interface Ui {
   filter: string;
   searchOpen: boolean;
   recent: string[];
+  sidebarWidth: number;
 }
+
+export const SIDEBAR_DEFAULT = 256;
+export const SIDEBAR_MIN = 200;
+export const SIDEBAR_MAX = 560;
 
 interface AppState {
   loaded: boolean;
@@ -88,6 +93,7 @@ export const [state, setState] = createStore<AppState>({
     filter: "",
     searchOpen: false,
     recent: [],
+    sidebarWidth: SIDEBAR_DEFAULT,
   },
 });
 
@@ -234,6 +240,7 @@ export async function init() {
       ui.collapsed = saved.collapsed ?? {};
       ui.groupByProject = keepProjects(saved.groupByProject);
       ui.recent = saved.recent ?? [];
+      if (typeof saved.sidebarWidth === "number") ui.sidebarWidth = clampSidebar(saved.sidebarWidth);
       const tabs = keepProjects(saved.tabsByProject);
       for (const k of Object.keys(tabs)) tabs[k] = tabs[k].filter((id) => scriptIds.has(id));
       // every live script gets a tab, in sidebar order
@@ -255,9 +262,12 @@ export async function init() {
 
   createRoot(() =>
     createEffect(() => {
-      const { projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent } = state.ui;
+      const { projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth } = state.ui;
       try {
-        localStorage.setItem(UI_KEY, JSON.stringify({ projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent }));
+        localStorage.setItem(
+          UI_KEY,
+          JSON.stringify({ projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth }),
+        );
       } catch {
         /* storage unavailable */
       }
@@ -290,6 +300,14 @@ export function selectProject(projectId: string) {
     setState("ui", "inspectorScriptId", null);
   }
 }
+
+/** Keep the main column usable: never wider than the window minus ~560px of content. */
+export function clampSidebar(px: number) {
+  const roomy = Math.max(SIDEBAR_MIN, window.innerWidth - 560);
+  return Math.round(Math.min(Math.max(px, SIDEBAR_MIN), SIDEBAR_MAX, roomy));
+}
+
+export const setSidebarWidth = (px: number) => setState("ui", "sidebarWidth", clampSidebar(px));
 
 export function toggleCollapsed(projectId: string) {
   setState("ui", "collapsed", projectId, (c) => !c);

@@ -72,6 +72,7 @@
 
 /* ---------------------------------------------------------------- sidebar */
 .sidebar {
+  position: relative;
   width: var(--sidebar-w);
   flex-shrink: 0;
   display: flex;
@@ -82,6 +83,40 @@
 }
 html.vibrant .sidebar {
   background: rgba(20, 24, 29, 0.8);
+}
+/* 7px grab area straddling the border; a 2px accent line shows on hover / drag / focus */
+.sb-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 7px;
+  z-index: 10;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sb-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background-color 120ms ease 80ms;
+}
+.sb-resizer:hover::after,
+.sb-resizer:focus-visible::after,
+.sb-resizer[data-dragging="true"]::after {
+  background: var(--accent);
+}
+.sb-resizer:focus-visible {
+  outline: none;
+}
+html.col-resizing,
+html.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .sb-header {
   display: flex;

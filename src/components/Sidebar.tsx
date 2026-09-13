@@ -19,6 +19,10 @@ import {
   saveGroup,
   saveScript,
   scriptsOf,
+  setSidebarWidth,
+  SIDEBAR_DEFAULT,
+  SIDEBAR_MAX,
+  SIDEBAR_MIN,
   selectedGroup,
   selectGroup,
   selectProject,
@@ -33,7 +37,8 @@ import {
 
 export function Sidebar() {
   return (
-    <aside class="sidebar">
+    <aside class="sidebar" style={{ width: `${state.ui.sidebarWidth}px` }}>
+      <SidebarResizer />
       <div class="sb-header">
         <span class="t-label-caps c-muted">Projects</span>
         <div class="grow" />
@@ -78,6 +83,54 @@ export function Sidebar() {
         </div>
       </Show>
     </aside>
+  );
+}
+
+/** Drag the sidebar's right edge; double-click resets; arrow keys nudge when focused. */
+function SidebarResizer() {
+  const [dragging, setDragging] = createSignal(false);
+
+  const onPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    el.setPointerCapture(e.pointerId);
+    const startX = e.clientX;
+    const startW = state.ui.sidebarWidth;
+    setDragging(true);
+    document.documentElement.classList.add("col-resizing");
+    const move = (ev: PointerEvent) => setSidebarWidth(startW + ev.clientX - startX);
+    const up = () => {
+      setDragging(false);
+      document.documentElement.classList.remove("col-resizing");
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", up);
+  };
+
+  return (
+    <div
+      class="sb-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuemin={SIDEBAR_MIN}
+      aria-valuemax={SIDEBAR_MAX}
+      aria-valuenow={state.ui.sidebarWidth}
+      tabIndex={0}
+      data-dragging={dragging()}
+      title="Drag to resize · double-click to reset"
+      onPointerDown={onPointerDown}
+      onDblClick={() => setSidebarWidth(SIDEBAR_DEFAULT)}
+      onKeyDown={(e) => {
+        if (e.key === "ArrowLeft") setSidebarWidth(state.ui.sidebarWidth - 16);
+        if (e.key === "ArrowRight") setSidebarWidth(state.ui.sidebarWidth + 16);
+      }}
+    />
   );
 }
 
@@ -247,7 +300,7 @@ function ScriptRow(props: { script: Script }) {
       onClick={() => openScript(s().id)}
       onDblClick={() => openInspector(s().id)}
       onContextMenu={menu}
-      title={s().cmd}
+      title={`${displayName(s())}\n${s().cmd}`}
     >
       <span class="dot" data-state={run().state} style={{ width: "7px", height: "7px" }} />
       <span class="ellipsis">{displayName(s())}</span>
