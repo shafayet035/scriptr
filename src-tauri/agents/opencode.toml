@@ -1,0 +1,31 @@
+# opencode — verified against opencode 1.18.34 (Oct 2026).
+# `opencode run --help`: -i interactive, --format json, -m provider/model,
+# -s <session>, --auto. Models are provider-qualified.
+id   = "opencode"
+name = "opencode"
+bin  = "opencode"
+
+interactive_args = ["run", "-i", "{prompt}"]
+headless_args    = ["run", "{prompt}", "--format", "json"]
+resume_args      = ["-s", "{session}"]
+model_args       = ["-m", "{model}"]
+
+stream   = "opencode-json"
+models   = ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-1", "openai/gpt-5"]
+docs_url = "https://opencode.ai/docs/cli"
+
+[autonomy]
+ask       = []
+auto-edit = []
+full      = ["--auto"]
+
+# `--variant` carries provider-specific reasoning effort (--help names minimal,
+# high, max). medium is the providers' own default, so it passes no flag and is
+# listed as unsupported rather than pretending to set it.
+[effort]
+low       = ["--variant", "minimal"]
+medium    = []
+high      = ["--variant", "high"]
+extra     = ["--variant", "high"]
+max       = ["--variant", "max"]
+ultracode = []

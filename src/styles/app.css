@@ -143,9 +143,20 @@ select {
 .dot[data-state="queued"] { background: var(--status-queued); }
 .dot[data-state="crashed"],
 .dot[data-state="backoff"] { background: var(--status-crashed); }
+/* task status reuses the same palette; review is the one state scripts don't have */
+.dot[data-task="running"] { background: var(--status-running); }
+.dot[data-task="starting"] { background: var(--status-starting); }
+.dot[data-task="queued"] { background: var(--status-queued); }
+.dot[data-task="crashed"] { background: var(--status-crashed); }
+.dot[data-task="review"] { background: var(--accent); }
+.dot[data-task="stopped"] { background: var(--status-stopped); }
+
 .dot[data-state="starting"],
 .dot[data-state="queued"],
-.dot[data-state="stopping"] {
+.dot[data-state="stopping"],
+.dot[data-task="running"],
+.dot[data-task="starting"],
+.dot[data-task="queued"] {
   animation: pulse 1.2s ease-in-out infinite;
 }
 

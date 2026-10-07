@@ -166,6 +166,120 @@ export interface ProcStats {
   memBytes: number;
 }
 
+// ---------------------------------------------------------------------------
+// AI tasks (docs/AI-PM.md). Slice A: an agent run is a run like any other.
+// Fields marked "later" are stored and exported now so the model doesn't have to
+// change when worktrees (B), verification (C), the board (D) and the backlog (G) land.
+// ---------------------------------------------------------------------------
+
+export type TaskStatus =
+  | "backlog"
+  | "queued"
+  | "working"
+  | "verifying"
+  | "review"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+/** How much the agent may do without asking. Maps to per-adapter flags. */
+export type Autonomy = "ask" | "auto-edit" | "full";
+
+/**
+ * How hard the model should think. Claude Code's own ladder, where "extra" is
+ * its `xhigh` and "ultracode" is its multi-agent mode (a prompt keyword, not a
+ * flag). Other agents map these onto their own switches, and can't express all
+ * of them — see `AgentAdapter.effortArgs`.
+ */
+export type Effort = "low" | "medium" | "high" | "extra" | "max" | "ultracode";
+
+export const EFFORTS: Effort[] = ["low", "medium", "high", "extra", "max", "ultracode"];
+
+/** Where the agent works. "worktree" lands in slice B. */
+export type WorkspaceMode = "in-place" | "worktree";
+
+/** Machine-readable progress format, when the CLI offers one. */
+export type AgentStream = "none" | "claude-json" | "opencode-json" | "cursor-json";
+
+/** A provider adapter: data, not code, so new CLIs need no Rust change. */
+export interface AgentAdapter {
+  id: string;
+  name: string;
+  /** executable looked up on PATH */
+  bin: string;
+  /** argv templates; placeholders: {prompt} {model} {session} */
+  interactiveArgs: string[];
+  headlessArgs: string[];
+  resumeArgs: string[];
+  modelArgs: string[];
+  /** extra argv per autonomy level */
+  autonomyArgs: Record<Autonomy, string[]>;
+  /** extra argv per effort level; empty array = this agent can't express it */
+  effortArgs: Record<Effort, string[]>;
+  /** levels opted into by prompt keyword instead of a flag */
+  effortPrompt: Partial<Record<Effort, string>>;
+  stream: AgentStream;
+  /** suggested models for the picker; free text is allowed too */
+  models: string[];
+  docsUrl: string | null;
+  source: "builtin" | "user" | "project";
+  /** resolved at load time */
+  available: boolean;
+  version: string | null;
+}
+
+export interface Task {
+  id: string;
+  projectId: string;
+  title: string;
+  /** the prompt handed to the agent */
+  goal: string;
+  agentId: string;
+  model: string | null;
+  autonomy: Autonomy;
+  /** null = the agent's own default */
+  effort: Effort | null;
+  workspace: WorkspaceMode;
+  /** later (B): branch backing the worktree */
+  branch: string | null;
+  /** later (D): task ids this task starts after — same scheduler as scripts */
+  after: string[];
+  /** later (C): script ids that must pass for the task to count as done */
+  verify: string[];
+  status: TaskStatus;
+  /** PM: 0 none · 1 low · 2 medium · 3 high */
+  priority: number;
+  /** PM: "me" or "agent:<adapterId>" */
+  assignee: string | null;
+  labels: string[];
+  /** PM: linked GitHub/Linear issue */
+  issueUrl: string | null;
+  budgetTokens: number | null;
+  budgetSeconds: number | null;
+  createdAt: number;
+  updatedAt: number;
+  sortOrder: number;
+}
+
+/** One attempt at a task. Mirrors RunInfo, plus what agents report about themselves. */
+export interface TaskRun {
+  id: string;
+  taskId: string;
+  state: RunState;
+  pid: number | null;
+  startedAt: number | null;
+  endedAt: number | null;
+  exitCode: number | null;
+  /** agent session id, for resume and repair loops */
+  sessionId: string | null;
+  turns: number | null;
+  costUsd: number | null;
+  tokensIn: number | null;
+  tokensOut: number | null;
+  /** final assistant message / result text, when the stream format gives one */
+  summary: string | null;
+}
+
 export interface RunRecord {
   startedAt: number;
   endedAt: number | null;

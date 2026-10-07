@@ -1,0 +1,30 @@
+# aider — UNVERIFIED: aider is not installed on this machine, so these flags
+# come from the brief and upstream docs, not from `aider --help`.
+# aider has no stream-json mode; cost/turns are not harvested.
+id   = "aider"
+name = "aider"
+bin  = "aider"
+
+interactive_args = ["--message", "{prompt}"]
+headless_args    = ["--message", "{prompt}"]
+resume_args      = []
+model_args       = ["--model", "{model}"]
+
+stream   = "none"
+models   = ["sonnet", "gpt-5", "o3"]
+docs_url = "https://aider.chat/docs/usage.html"
+
+[autonomy]
+ask       = []
+auto-edit = []
+full      = ["--yes-always"]
+
+# UNVERIFIED — aider is not installed here. `--reasoning-effort` is documented
+# as low/medium/high, so extra and max collapse onto high; aider warns rather
+# than fails when a model does not support it.
+[effort]
+low    = ["--reasoning-effort", "low"]
+medium = ["--reasoning-effort", "medium"]
+high   = ["--reasoning-effort", "high"]
+extra  = ["--reasoning-effort", "high"]
+max    = ["--reasoning-effort", "high"]

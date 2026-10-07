@@ -1,0 +1,23 @@
+# Cursor Agent — verified against cursor-agent 2025.09.18-7ae6800 (Oct 2026).
+# `--help`: -p/--print, --output-format stream-json, --resume [chatId],
+# --model, -f/--force. There is no ask/auto-edit flag: interactive mode asks.
+id   = "cursor-agent"
+name = "Cursor Agent"
+bin  = "cursor-agent"
+
+interactive_args = ["{prompt}"]
+headless_args    = ["-p", "{prompt}", "--output-format", "stream-json"]
+resume_args      = ["--resume", "{session}"]
+model_args       = ["--model", "{model}"]
+
+stream   = "cursor-json"
+models   = ["gpt-5", "sonnet-4.5", "sonnet-4.5-thinking"]
+docs_url = "https://docs.cursor.com/en/cli/overview"
+
+[autonomy]
+ask       = []
+auto-edit = []
+full      = ["-f"]
+
+# No effort flag: cursor-agent exposes thinking through model names such as
+# sonnet-4-thinking, so pick a thinking model instead.

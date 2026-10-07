@@ -3,8 +3,11 @@ import { createStore, produce, reconcile } from "solid-js/store";
 import { computePlan } from "../lib/graph";
 import { backend, initBackend, pickFolder, pickSavePath, pickTomlFile } from "../lib/ipc";
 import { isLive } from "../lib/format";
+import { isTaskKey, taskIdOf, taskKey } from "../lib/terminals";
 import type {
   AddProjectInput,
+  AgentAdapter,
+  Autonomy,
   Group,
   GroupProgress,
   Plan,
@@ -14,9 +17,11 @@ import type {
   ScanResult,
   Script,
   Settings,
+  Task,
+  TaskRun,
 } from "../lib/types";
 
-export type View = "terminals" | "deps" | "log";
+export type View = "board" | "terminals" | "deps" | "log";
 export type SettingsSection =
   | "general"
   | "terminal"
@@ -44,6 +49,12 @@ interface Ui {
   searchOpen: boolean;
   recent: string[];
   sidebarWidth: number;
+  /** open composer: a task id to edit, "" for a new task, null for closed */
+  composerTaskId: string | null;
+  /** card the board keyboard acts on */
+  boardSelection: string | null;
+  /** where each task's terminal lives; the deck lands in the next slice */
+  termHome: Record<string, "deck" | "tab">;
 }
 
 export const SIDEBAR_DEFAULT = 256;
@@ -58,6 +69,10 @@ interface AppState {
   settings: Settings;
   dbPath: string;
   runs: Record<string, RunInfo>;
+  agents: AgentAdapter[];
+  tasks: Task[];
+  /** latest run per task */
+  taskRuns: Record<string, TaskRun | null>;
   stats: Record<string, ProcStats>;
   progress: Record<string, GroupProgress>;
   /** last observed starting → ready duration per script, for the cold-start estimate */
@@ -75,6 +90,9 @@ export const [state, setState] = createStore<AppState>({
   settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc" },
   dbPath: "",
   runs: {},
+  agents: [],
+  tasks: [],
+  taskRuns: {},
   stats: {},
   progress: {},
   readyMs: {},
@@ -94,6 +112,9 @@ export const [state, setState] = createStore<AppState>({
     searchOpen: false,
     recent: [],
     sidebarWidth: SIDEBAR_DEFAULT,
+    composerTaskId: null,
+    boardSelection: null,
+    termHome: {},
   },
 });
 
@@ -163,6 +184,12 @@ export const planFor = (projectId: string): Plan => {
 };
 
 export const tabsOf = (projectId: string) => state.ui.tabsByProject[projectId] ?? [];
+
+export const task = (id: string | null) => state.tasks.find((t) => t.id === id);
+export const tasksOf = (projectId: string) =>
+  state.tasks.filter((t) => t.projectId === projectId).sort((a, b) => b.priority - a.priority || a.sortOrder - b.sortOrder);
+export const taskRunOf = (taskId: string) => state.taskRuns[taskId] ?? null;
+export const agent = (id: string | null) => state.agents.find((a) => a.id === id);
 export const activeScriptId = () => {
   const pid = state.ui.projectId;
   return pid ? (state.ui.activeByProject[pid] ?? null) : null;
@@ -196,15 +223,20 @@ function onRunInfo(r: RunInfo) {
   if (isLive(r.state) && (!prevState || !isLive(prevState))) ensureTab(r.scriptId, false);
 }
 
-function ensureTab(scriptId: string, focus: boolean) {
-  const s = script(scriptId);
-  if (!s) return;
+/** A tab key is a script id, or `task:<id>` for an agent run. */
+export function projectOfTab(key: string): string | undefined {
+  return isTaskKey(key) ? task(taskIdOf(key))?.projectId : script(key)?.projectId;
+}
+
+function ensureTab(key: string, focus: boolean) {
+  const projectId = projectOfTab(key);
+  if (!projectId) return;
   setState(
     "ui",
     produce((ui) => {
-      const tabs = ui.tabsByProject[s.projectId] ?? [];
-      if (!tabs.includes(scriptId)) ui.tabsByProject[s.projectId] = [...tabs, scriptId];
-      if (focus || !ui.activeByProject[s.projectId]) ui.activeByProject[s.projectId] = scriptId;
+      const tabs = ui.tabsByProject[projectId] ?? [];
+      if (!tabs.includes(key)) ui.tabsByProject[projectId] = [...tabs, key];
+      if (focus || !ui.activeByProject[projectId]) ui.activeByProject[projectId] = key;
     }),
   );
 }
@@ -241,6 +273,7 @@ export async function init() {
       ui.groupByProject = keepProjects(saved.groupByProject);
       ui.recent = saved.recent ?? [];
       if (typeof saved.sidebarWidth === "number") ui.sidebarWidth = clampSidebar(saved.sidebarWidth);
+      if (saved.view) ui.view = saved.view;
       const tabs = keepProjects(saved.tabsByProject);
       for (const k of Object.keys(tabs)) tabs[k] = tabs[k].filter((id) => scriptIds.has(id));
       // every live script gets a tab, in sidebar order
@@ -262,11 +295,12 @@ export async function init() {
 
   createRoot(() =>
     createEffect(() => {
-      const { projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth } = state.ui;
+      const { projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth, view } =
+        state.ui;
       try {
         localStorage.setItem(
           UI_KEY,
-          JSON.stringify({ projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth }),
+          JSON.stringify({ projectId, collapsed, groupByProject, tabsByProject, activeByProject, recent, sidebarWidth, view }),
         );
       } catch {
         /* storage unavailable */
@@ -283,7 +317,42 @@ export async function init() {
     }
   });
   void backend.on("project:changed", () => void refresh());
+  void backend.on("task:state", ({ task, run }) => {
+    setState("tasks", (list) => {
+      const i = list.findIndex((t) => t.id === task.id);
+      return i >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
+    });
+    setState("taskRuns", task.id, run);
+    if (task.status === "working" || task.status === "queued") ensureTab(taskKey(task.id), false);
+  });
   void backend.on("menu", onMenu);
+
+  // Agents and tasks load after the first paint; neither blocks the workspace.
+  void loadAgents();
+  void Promise.all(snap.projects.map((p) => loadTasks(p.id)));
+}
+
+export async function loadAgents() {
+  try {
+    setState("agents", await backend.agentList());
+  } catch (e) {
+    toast(errText(e), "error");
+  }
+}
+
+export async function loadTasks(projectId: string) {
+  try {
+    const list = await backend.taskList(projectId);
+    setState("tasks", (prev) => [...prev.filter((t) => t.projectId !== projectId), ...list]);
+    await Promise.all(
+      list.map(async (t) => {
+        const runs = await backend.taskRuns(t.id);
+        setState("taskRuns", t.id, runs.at(-1) ?? null);
+      }),
+    );
+  } catch (e) {
+    toast(errText(e), "error");
+  }
 }
 
 export async function refresh() {
@@ -322,18 +391,18 @@ export function openScript(scriptId: string) {
   if (state.ui.inspectorScriptId) setState("ui", "inspectorScriptId", scriptId);
 }
 
-export function closeTab(scriptId: string) {
-  const s = script(scriptId);
-  if (!s) return;
+export function closeTab(key: string) {
+  const projectId = projectOfTab(key) ?? state.ui.projectId;
+  if (!projectId) return;
   setState(
     "ui",
     produce((ui) => {
-      const tabs = ui.tabsByProject[s.projectId] ?? [];
-      const i = tabs.indexOf(scriptId);
-      const next = tabs.filter((id) => id !== scriptId);
-      ui.tabsByProject[s.projectId] = next;
-      if (ui.activeByProject[s.projectId] === scriptId) {
-        ui.activeByProject[s.projectId] = next[Math.min(i, next.length - 1)] ?? null;
+      const tabs = ui.tabsByProject[projectId] ?? [];
+      const i = tabs.indexOf(key);
+      const next = tabs.filter((id) => id !== key);
+      ui.tabsByProject[projectId] = next;
+      if (ui.activeByProject[projectId] === key) {
+        ui.activeByProject[projectId] = next[Math.min(i, next.length - 1)] ?? null;
       }
     }),
   );
@@ -354,6 +423,7 @@ export function terminalFocus(scriptId: string) {
 }
 
 export const setView = (view: View) => setState("ui", { view, settingsOpen: false });
+export const selectCard = (taskId: string | null) => setState("ui", "boardSelection", taskId);
 export const selectGroup = (projectId: string, groupId: string | null) => setState("ui", "groupByProject", projectId, groupId);
 export const openInspector = (scriptId: string | null) => setState("ui", "inspectorScriptId", scriptId);
 export const toggleInspector = () => openInspector(state.ui.inspectorScriptId ? null : activeScriptId());
@@ -402,6 +472,56 @@ export async function stopScope(projectId: string) {
 
 export const continueGroup = (groupId: string) => attempt(backend.groupContinue(groupId));
 export const stopEverything = () => attempt(backend.stopEverything());
+
+// ---------------------------------------------------------------- AI tasks
+
+export function openTask(taskId: string) {
+  const t = task(taskId);
+  if (!t) return;
+  selectProject(t.projectId);
+  ensureTab(taskKey(taskId), true);
+  setState("ui", "view", "terminals");
+}
+
+export async function startTask(taskId: string) {
+  openTask(taskId);
+  await attempt(backend.taskStart(taskId));
+}
+
+export const stopTask = (taskId: string) => attempt(backend.taskStop(taskId));
+
+export async function saveTask(next: Task) {
+  const saved = await attempt(backend.taskSave(plain(next)));
+  if (!saved) return undefined;
+  setState("tasks", (list) => {
+    const i = list.findIndex((t) => t.id === saved.id);
+    return i >= 0 ? list.map((t) => (t.id === saved.id ? saved : t)) : [...list, saved];
+  });
+  return saved;
+}
+
+export async function deleteTask(taskId: string) {
+  closeTab(taskKey(taskId));
+  await attempt(backend.taskDelete(taskId));
+  setState("tasks", (list) => list.filter((t) => t.id !== taskId));
+}
+
+export const setTaskStatus = (t: Task, status: Task["status"]) => saveTask({ ...t, status });
+
+/** `""` composes a new task; a task id edits that one. */
+export const openComposer = (taskId: string | "" = "") => setState("ui", "composerTaskId", taskId);
+export const closeComposer = () => setState("ui", "composerTaskId", null);
+
+export function newTaskDraft(projectId: string): Task {
+  const preferred = state.agents.find((a) => a.available) ?? state.agents[0];
+  return {
+    id: "", projectId, title: "", goal: "", agentId: preferred?.id ?? "", model: null,
+    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, after: [], verify: [],
+    status: "backlog", priority: 1, assignee: preferred ? `agent:${preferred.id}` : null, labels: [],
+    issueUrl: null, budgetTokens: null, budgetSeconds: null,
+    createdAt: Date.now(), updatedAt: Date.now(), sortOrder: tasksOf(projectId).length,
+  };
+}
 
 // ---------------------------------------------------------------- editing
 
@@ -514,6 +634,8 @@ function onMenu(id: string) {
       return toggleSettings();
     case "add-project":
       return void beginAddProject();
+    case "new-task":
+      return pid && openComposer("");
     case "import-toml":
       return pid && void importToml(pid, state.settings.importMode);
     case "export-toml":
@@ -524,6 +646,8 @@ function onMenu(id: string) {
       return active && closeTab(active);
     case "palette":
       return setPalette(!state.ui.paletteOpen);
+    case "view-board":
+      return setView("board");
     case "view-terminals":
       return setView("terminals");
     case "view-deps":
@@ -556,8 +680,9 @@ export function handleShortcut(e: KeyboardEvent): boolean {
   const map: Record<string, string> = e.shiftKey
     ? { ".": "stop-everything", ">": "stop-everything", r: "restart-script", "]": "next-tab", "[": "prev-tab", "}": "next-tab", "{": "prev-tab" }
     : {
-        k: "palette", ",": "settings", o: "add-project", w: "close-tab", "1": "view-terminals", "2": "view-deps",
-        "3": "view-log", f: "find", i: "toggle-inspector", r: "run-group", ".": "stop-group",
+        k: "palette", ",": "settings", o: "add-project", w: "close-tab", "1": "view-board", "2": "view-terminals",
+        "3": "view-deps", "4": "view-log", f: "find", i: "toggle-inspector", r: "run-group", ".": "stop-group",
+        t: "new-task",
       };
   const id = map[k];
   if (!id) return false;

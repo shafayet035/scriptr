@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AddProjectInput,
+  AgentAdapter,
   GroupProgress,
   Group,
   ImportReport,
@@ -13,6 +14,8 @@ import type {
   Script,
   Settings,
   Snapshot,
+  Task,
+  TaskRun,
 } from "./types";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -22,6 +25,7 @@ export interface EventMap {
   "script:state": RunInfo;
   "group:progress": GroupProgress;
   "project:changed": { projectId: string };
+  "task:state": { task: Task; run: TaskRun | null };
   stats: ProcStats[];
   menu: string;
 }
@@ -53,6 +57,17 @@ export interface Backend {
   settingsSet(settings: Settings): Promise<Settings>;
   dbBackup(dest: string): Promise<void>;
   runHistory(scriptId: string): Promise<RunRecord[]>;
+  // --- AI tasks (docs/AI-PM.md) ---
+  agentList(): Promise<AgentAdapter[]>;
+  taskList(projectId: string): Promise<Task[]>;
+  taskSave(task: Task): Promise<Task>;
+  taskDelete(taskId: string): Promise<void>;
+  taskStart(taskId: string): Promise<void>;
+  taskStop(taskId: string): Promise<void>;
+  taskRuns(taskId: string): Promise<TaskRun[]>;
+  taskAttach(taskId: string, onData: (bytes: Uint8Array) => void): Promise<void>;
+  taskWrite(taskId: string, data: string): Promise<void>;
+  taskResize(taskId: string, cols: number, rows: number): Promise<void>;
   on<K extends keyof EventMap>(event: K, handler: (payload: EventMap[K]) => void): Promise<() => void>;
 }
 
@@ -94,6 +109,20 @@ const tauriBackend: Backend = {
   settingsSet: (settings) => invoke("settings_set", { settings }),
   dbBackup: (dest) => invoke("db_backup", { dest }),
   runHistory: (scriptId) => invoke("run_history", { scriptId }),
+  agentList: () => invoke("agent_list"),
+  taskList: (projectId) => invoke("task_list", { projectId }),
+  taskSave: (task) => invoke("task_save", { task }),
+  taskDelete: (taskId) => invoke("task_delete", { taskId }),
+  taskStart: (taskId) => invoke("task_start", { taskId }),
+  taskStop: (taskId) => invoke("task_stop", { taskId }),
+  taskRuns: (taskId) => invoke("task_runs", { taskId }),
+  taskAttach: (taskId, onData) => {
+    const onDataChannel = new Channel<unknown>();
+    onDataChannel.onmessage = (msg) => onData(toBytes(msg));
+    return invoke("task_attach", { taskId, onData: onDataChannel });
+  },
+  taskWrite: (taskId, data) => invoke("task_write", { taskId, data }),
+  taskResize: (taskId, cols, rows) => invoke("task_resize", { taskId, cols, rows }),
   on: (event, handler) => listen(event, (e) => handler(e.payload as never)),
 };
 

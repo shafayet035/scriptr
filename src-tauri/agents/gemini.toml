@@ -1,0 +1,23 @@
+# Gemini CLI — flags per the brief and the upstream docs. The copy installed on
+# this machine (@google/gemini-cli 0.18.4 via pnpm) is broken (MODULE_NOT_FOUND),
+# so `gemini --help` could not be read back: treat the argv below as unverified.
+# Gemini CLI has no machine-readable stream format we parse yet.
+id   = "gemini"
+name = "Gemini CLI"
+bin  = "gemini"
+
+interactive_args = ["-p", "{prompt}"]
+headless_args    = ["-p", "{prompt}"]
+resume_args      = []
+model_args       = ["-m", "{model}"]
+
+stream   = "none"
+models   = ["gemini-2.5-pro", "gemini-2.5-flash"]
+docs_url = "https://github.com/google-gemini/gemini-cli"
+
+[autonomy]
+ask       = []
+auto-edit = []
+full      = ["--yolo"]
+
+# No effort flag in gemini --help (0.9.x); the level picker stays disabled.

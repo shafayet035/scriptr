@@ -8,6 +8,8 @@ import {
   beginAddProject,
   countsOf,
   deleteScript,
+  openComposer,
+  tasksOf,
   exportToml,
   groupsOf,
   openInspector,
@@ -205,6 +207,39 @@ function ProjectBlock(props: { project: Project }) {
           <div class="sb-section t-label-caps">Scripts</div>
           <For each={filtered()}>{(s) => <ScriptRow script={s} />}</For>
         </Show>
+        {/* The board owns the task list now; the sidebar keeps a way in and the counts that matter. */}
+        <Show when={!state.ui.filter}>
+          <div class="sb-section t-label-caps">Tasks</div>
+          <div
+            class="sb-row script"
+            role="button"
+            aria-current={state.ui.projectId === p().id && state.ui.view === "board"}
+            onClick={() => (selectProject(p().id), setView("board"))}
+            onContextMenu={(e) => popupMenu([{ label: "New task…", action: () => (selectProject(p().id), openComposer("")) }], e)}
+            title="Open the task board"
+          >
+            <Icon name="layers" size={13} color={taskCounts(p().id).working > 0 ? "var(--status-running)" : "var(--text-muted)"} />
+            <span class="ellipsis">Board</span>
+            <div class="grow" />
+            <Show when={taskCounts(p().id).review > 0}>
+              <span class="t-caption-11 c-accent">{taskCounts(p().id).review} review</span>
+            </Show>
+            <Show when={taskCounts(p().id).total > 0} fallback={<span class="count">none</span>}>
+              <span class="count">{taskCounts(p().id).total}</span>
+            </Show>
+            <button
+              class="row-action"
+              title="New task"
+              onClick={(e) => {
+                e.stopPropagation();
+                selectProject(p().id);
+                openComposer("");
+              }}
+            >
+              <Icon name="plus" size={12} />
+            </button>
+          </div>
+        </Show>
       </Show>
     </>
   );
@@ -311,6 +346,16 @@ function ScriptRow(props: { script: Script }) {
       <RowAction live={isLive(run().state)} onClick={() => void (isLive(run().state) ? stopScript(s().id) : startScript(s().id, false))} />
     </div>
   );
+}
+
+/** Counts behind the sidebar's single Tasks row. */
+function taskCounts(projectId: string) {
+  const list = tasksOf(projectId);
+  return {
+    total: list.length,
+    working: list.filter((t) => t.status === "working" || t.status === "queued" || t.status === "verifying").length,
+    review: list.filter((t) => t.status === "review").length,
+  };
 }
 
 function RowAction(props: { live: boolean; onClick: () => void }) {

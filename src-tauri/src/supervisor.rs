@@ -25,8 +25,8 @@ use tokio::task::JoinSet;
 
 use crate::db::Db;
 use crate::graph;
-use crate::model::{now_ms, Gate, GroupProgress, RestartOn, RestartPolicy, RunInfo, RunState, Script};
-use crate::pty::{self, DataSink, LogMatcher, ProcessGroup, ScriptOutput, SpawnSpec};
+use crate::model::{now_ms, Gate, GroupProgress, RestartOn, RestartPolicy, RunInfo, RunState, Script, Task, TaskRun};
+use crate::pty::{self, DataSink, LogMatcher, ProcessGroup, RunKey, SpawnSpec, Terminal, Terminals};
 
 /// SIGTERM → SIGKILL grace period.
 pub const STOP_GRACE: Duration = Duration::from_secs(3);
@@ -41,6 +41,8 @@ const GROUP_POLL: Duration = Duration::from_millis(10);
 pub trait EventSink: Send + Sync + 'static {
     fn run_changed(&self, info: &RunInfo);
     fn group_progress(&self, progress: &GroupProgress);
+    /// `task:state`. Defaulted so script-only sinks need no change.
+    fn task_changed(&self, _task: &Task, _run: Option<&TaskRun>) {}
 }
 
 /// Whether a script currently satisfies dependents.
@@ -72,8 +74,6 @@ enum Ctl {
 struct Slot {
     status: watch::Sender<Status>,
     ctl: Option<mpsc::UnboundedSender<Ctl>>,
-    io: Option<Arc<pty::PtyIo>>,
-    output: Arc<ScriptOutput>,
 }
 
 impl Slot {
@@ -83,7 +83,7 @@ impl Slot {
             readiness: Readiness::Down,
             active: false,
         });
-        Self { status, ctl: None, io: None, output: Arc::default() }
+        Self { status, ctl: None }
     }
 }
 
@@ -122,12 +122,22 @@ enum GateOutcome {
 pub struct Supervisor {
     db: Arc<Db>,
     events: Arc<dyn EventSink>,
+    terminals: Arc<Terminals>,
     slots: Mutex<HashMap<String, Slot>>,
 }
 
 impl Supervisor {
     pub fn new(db: Arc<Db>, events: Arc<dyn EventSink>) -> Arc<Self> {
-        Arc::new(Self { db, events, slots: Mutex::default() })
+        Self::with_terminals(db, events, Arc::default())
+    }
+
+    /// Shares one terminal registry with the task runner.
+    pub fn with_terminals(db: Arc<Db>, events: Arc<dyn EventSink>, terminals: Arc<Terminals>) -> Arc<Self> {
+        Arc::new(Self { db, events, terminals, slots: Mutex::default() })
+    }
+
+    pub fn terminals(&self) -> Arc<Terminals> {
+        self.terminals.clone()
     }
 
     fn slots(&self) -> MutexGuard<'_, HashMap<String, Slot>> {
@@ -159,8 +169,8 @@ impl Supervisor {
 
     // ---- queries ----------------------------------------------------------
 
-    pub fn output(&self, id: &str) -> Arc<ScriptOutput> {
-        self.with_slot(id, |s| s.output.clone())
+    pub fn terminal(&self, id: &str) -> Arc<Terminal> {
+        self.terminals.get(&RunKey::script(id))
     }
 
     pub fn run_info(&self, id: &str) -> RunInfo {
@@ -194,11 +204,11 @@ impl Supervisor {
 
     /// Replaces the script's output sink; the ring buffer snapshot goes first.
     pub fn attach(&self, id: &str, sink: DataSink) {
-        self.output(id).attach(sink);
+        self.terminal(id).attach(sink);
     }
 
     pub fn write_input(&self, id: &str, data: &[u8]) -> Result<(), String> {
-        match self.with_slot(id, |s| s.io.clone()) {
+        match self.terminal(id).io() {
             Some(io) => io.write(data),
             None => Err("script is not running".into()),
         }
@@ -206,9 +216,7 @@ impl Supervisor {
 
     /// Remembers the size for future spawns and applies it to a live PTY.
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), String> {
-        let (output, io) = self.with_slot(id, |s| (s.output.clone(), s.io.clone()));
-        output.set_size(cols, rows);
-        io.map_or(Ok(()), |io| io.resize(cols.max(1), rows.max(1)))
+        self.terminal(id).resize(cols, rows)
     }
 
     // ---- control ----------------------------------------------------------
@@ -282,6 +290,7 @@ impl Supervisor {
     /// Drops all state for a deleted script. Stop it first.
     pub fn forget(&self, id: &str) {
         self.slots().remove(id);
+        self.terminals.remove(&RunKey::script(id));
     }
 
     fn check_cycles(&self, script: &Script) -> Result<(), String> {
@@ -310,9 +319,9 @@ impl Supervisor {
 
     async fn supervise(self: Arc<Self>, id: String, mut ctl: mpsc::UnboundedReceiver<Ctl>) {
         self.lifecycle(&id, &mut ctl).await;
+        self.terminal(&id).set_io(None);
         self.with_slot(&id, |slot| {
             slot.ctl = None;
-            slot.io = None;
             slot.status.send_modify(|s| {
                 s.active = false;
                 if s.readiness == Readiness::Pending {
@@ -323,7 +332,7 @@ impl Supervisor {
     }
 
     async fn lifecycle(self: &Arc<Self>, id: &str, ctl: &mut mpsc::UnboundedReceiver<Ctl>) {
-        let output = self.output(id);
+        let output = self.terminal(id);
         match self.await_dependencies(id, ctl).await {
             DepsOutcome::Ready => {}
             DepsOutcome::StoppedByUser => {
@@ -517,7 +526,7 @@ impl Supervisor {
             return Err(format!("working directory {} does not exist", cwd.display()));
         }
 
-        let output = self.output(id);
+        let output = self.terminal(id);
         let mut env = Vec::new();
         // env_file is resolved relative to the script's working directory.
         if let Some(file) = script.env_file.as_deref().filter(|f| !f.is_empty()) {
@@ -548,7 +557,7 @@ impl Supervisor {
         ctl: &mut mpsc::UnboundedReceiver<Ctl>,
     ) -> RunEnd {
         let Launch { spec, cmd, ready, policy } = launch;
-        let output = self.output(id);
+        let output = self.terminal(id);
         self.update(id, |s| {
             s.info = RunInfo {
                 state: RunState::Starting,
@@ -597,7 +606,7 @@ impl Supervisor {
             .ok();
         let pid = spawned.group.pid();
         let instant = matches!(ready, Gate::Instant);
-        self.with_slot(id, |s| s.io = Some(spawned.io.clone()));
+        self.terminal(id).set_io(Some(spawned.io.clone()));
         self.update(id, |s| {
             s.info.state = RunState::Running;
             s.info.pid = Some(pid);
@@ -685,7 +694,7 @@ impl Supervisor {
         drained: oneshot::Receiver<()>,
     ) {
         let _ = tokio::time::timeout(DRAIN_WAIT, drained).await;
-        self.with_slot(id, |s| s.io = None);
+        self.terminal(id).set_io(None);
         if let Some(row) = history {
             if let Err(e) = self.db.history_end(row, ended_at, code) {
                 log::warn!("run history: {e}");
@@ -698,7 +707,10 @@ impl Supervisor {
 
 /// SIGTERM the group, wait up to the grace period for the leader and every
 /// other member, then SIGKILL whatever is left.
-async fn terminate(group: &ProcessGroup, exited: &mut oneshot::Receiver<Option<i32>>) -> Option<i32> {
+pub(crate) async fn terminate(
+    group: &ProcessGroup,
+    exited: &mut oneshot::Receiver<Option<i32>>,
+) -> Option<i32> {
     let deadline = tokio::time::Instant::now() + STOP_GRACE;
     group.terminate();
     let code = match tokio::time::timeout_at(deadline, &mut *exited).await {
@@ -712,7 +724,7 @@ async fn terminate(group: &ProcessGroup, exited: &mut oneshot::Receiver<Option<i
     code
 }
 
-async fn reap_stragglers(group: &ProcessGroup) {
+pub(crate) async fn reap_stragglers(group: &ProcessGroup) {
     if group.alive() {
         group.terminate();
         wait_group_gone(group, tokio::time::Instant::now() + STOP_GRACE).await;
@@ -838,12 +850,12 @@ fn parse_status_line(head: &[u8]) -> Result<u16, String> {
 // ---- formatting -------------------------------------------------------------------
 
 /// `\r\n[scriptr] msg\r\n` in magenta.
-fn notice(msg: &str) -> Vec<u8> {
+pub(crate) fn notice(msg: &str) -> Vec<u8> {
     format!("\r\n\x1b[35m[scriptr]\x1b[0m {msg}\r\n").into_bytes()
 }
 
 /// `[scriptr] msg` with a dim message.
-fn dim_notice(msg: &str) -> Vec<u8> {
+pub(crate) fn dim_notice(msg: &str) -> Vec<u8> {
     format!("\x1b[35m[scriptr]\x1b[0m\x1b[2m {msg}\x1b[0m\r\n").into_bytes()
 }
 

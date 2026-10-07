@@ -85,6 +85,11 @@ async function loadRenderer(term: Terminal) {
   }
 }
 
+/** Terminal keys are a script id, or `task:<id>` for an agent run. */
+export const taskKey = (taskId: string) => `task:${taskId}`;
+export const isTaskKey = (key: string) => key.startsWith("task:");
+export const taskIdOf = (key: string) => key.slice(5);
+
 function create(scriptId: string, readOnly = false): TermEntry {
   const term = new Terminal({ ...baseOptions, disableStdin: readOnly, cursorInactiveStyle: readOnly ? "none" : "outline" });
   const fit = new FitAddon();
@@ -100,12 +105,14 @@ function create(scriptId: string, readOnly = false): TermEntry {
   entries.set(scriptId, entry);
 
   if (!readOnly) {
-    term.onData((d) => void backend.ptyWrite(scriptId, d));
-    term.onResize(({ cols, rows }) => void backend.ptyResize(scriptId, cols, rows));
-    void backend.ptyAttach(scriptId, (bytes) => {
+    const task = isTaskKey(scriptId) ? taskIdOf(scriptId) : null;
+    term.onData((d) => void (task ? backend.taskWrite(task, d) : backend.ptyWrite(scriptId, d)));
+    term.onResize(({ cols, rows }) => void (task ? backend.taskResize(task, cols, rows) : backend.ptyResize(scriptId, cols, rows)));
+    const sink = (bytes: Uint8Array) => {
       term.write(bytes);
       feedCombined(scriptId, bytes);
-    });
+    };
+    void (task ? backend.taskAttach(task, sink) : backend.ptyAttach(scriptId, sink));
   }
   return entry;
 }

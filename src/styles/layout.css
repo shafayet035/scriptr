@@ -230,6 +230,19 @@ html.col-resizing * {
   padding: 10px 12px 4px 26px;
   color: var(--text-muted);
 }
+.sb-section.row {
+  display: flex;
+  align-items: center;
+  padding-right: 8px;
+}
+.sb-row.task-empty {
+  gap: 6px;
+  color: var(--text-muted);
+  font: 400 11px/16px var(--font-ui);
+}
+.sb-row.task-empty:hover {
+  color: var(--text-secondary);
+}
 .row-action {
   display: inline-flex;
   align-items: center;

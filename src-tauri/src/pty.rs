@@ -1,8 +1,8 @@
 //! PTY plumbing: spawning, the blocking reader thread, the 16 ms / 8 KB
-//! batcher, the per-script ring buffer and output fan-out, and the ANSI
+//! batcher, the per-run ring buffer and output fan-out, and the ANSI
 //! stripping log matcher used by `log` gates.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -86,14 +86,34 @@ struct OutputInner {
     sink: Option<DataSink>,
 }
 
-/// Per-script output: the ring buffer plus the currently attached frontend
-/// sink. Survives restarts of the script.
-pub struct ScriptOutput {
-    inner: Mutex<OutputInner>,
-    size: Mutex<(u16, u16)>,
+/// Which kind of run a terminal belongs to. Scripts (`script.id`) and tasks
+/// (`task.id`) draw their ids from different tables, so the key keeps the two
+/// name spaces apart instead of trusting uuids not to collide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RunKey {
+    Script(String),
+    Task(String),
 }
 
-impl Default for ScriptOutput {
+impl RunKey {
+    pub fn script(id: &str) -> Self {
+        RunKey::Script(id.to_string())
+    }
+
+    pub fn task(id: &str) -> Self {
+        RunKey::Task(id.to_string())
+    }
+}
+
+/// Per-run terminal: the ring buffer, the currently attached frontend sink,
+/// the last known size and the live PTY handles. Survives restarts of the run.
+pub struct Terminal {
+    inner: Mutex<OutputInner>,
+    size: Mutex<(u16, u16)>,
+    io: Mutex<Option<Arc<PtyIo>>>,
+}
+
+impl Default for Terminal {
     fn default() -> Self {
         Self {
             inner: Mutex::new(OutputInner {
@@ -101,11 +121,12 @@ impl Default for ScriptOutput {
                 sink: None,
             }),
             size: Mutex::new(DEFAULT_SIZE),
+            io: Mutex::default(),
         }
     }
 }
 
-impl ScriptOutput {
+impl Terminal {
     /// Appends to the ring buffer and forwards to the attached sink.
     pub fn write(&self, data: &[u8]) {
         let mut inner = lock(&self.inner);
@@ -131,6 +152,41 @@ impl ScriptOutput {
 
     pub fn set_size(&self, cols: u16, rows: u16) {
         *lock(&self.size) = (cols.max(1), rows.max(1));
+    }
+
+    /// The live PTY handles, or `None` when no process is up.
+    pub fn io(&self) -> Option<Arc<PtyIo>> {
+        lock(&self.io).clone()
+    }
+
+    pub fn set_io(&self, io: Option<Arc<PtyIo>>) {
+        *lock(&self.io) = io;
+    }
+
+    /// Remembers the size for future spawns and applies it to a live PTY.
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        self.set_size(cols, rows);
+        self.io().map_or(Ok(()), |io| io.resize(cols, rows))
+    }
+}
+
+/// Every run's terminal, shared by the script supervisor and the task runner
+/// so both use one ring buffer, one batcher and one attach contract.
+#[derive(Default)]
+pub struct Terminals {
+    map: Mutex<HashMap<RunKey, Arc<Terminal>>>,
+}
+
+impl Terminals {
+    /// The terminal for `key`, created on first use.
+    pub fn get(&self, key: &RunKey) -> Arc<Terminal> {
+        lock(&self.map).entry(key.clone()).or_default().clone()
+    }
+
+    /// Drops a deleted run's scrollback.
+    pub fn remove(&self, key: &RunKey) {
+        lock(&self.map).remove(key);
     }
 }
 

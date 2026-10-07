@@ -1,18 +1,23 @@
 import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import { Icon } from "../components/Icon";
 import { DependencyView } from "./DependencyView";
+import { BoardCanvas } from "./board/BoardCanvas";
 import { popupMenu } from "../lib/menu";
 import {
   displayName,
   fmtBytes,
+  fmtCost,
   fmtDuration,
   fmtUptime,
   gateDescription,
   isLive,
   runBadge,
+  taskTone,
+  TASK_STATUS_LABEL,
   tildify,
   tone,
 } from "../lib/format";
+import { isTaskKey, taskIdOf } from "../lib/terminals";
 import {
   COMBINED_ID,
   clearTerminal,
@@ -25,8 +30,18 @@ import {
 } from "../lib/terminals";
 import {
   activeScriptId,
+  agent,
   cancelRetry,
   closeTab,
+  openComposer,
+  openTask,
+  projectOfTab,
+  setTaskStatus,
+  startTask,
+  stopTask,
+  task,
+  taskRunOf,
+  tasksOf,
   continueGroup,
   countsOf,
   currentProject,
@@ -63,6 +78,10 @@ export function Workspace() {
         <Match when={state.ui.view === "terminals"}>
           <TabBar />
           <TerminalPane />
+        </Match>
+        <Match when={state.ui.view === "board"}>
+          <ViewSwitcher />
+          <BoardCanvas />
         </Match>
         <Match when={true}>
           <ViewSwitcher />
@@ -163,52 +182,17 @@ function TabBar() {
   return (
     <div class="tabbar">
       <div class="tabs" role="tablist">
-        <For each={tabsOf(pid())}>
-          {(id) => (
-            <Show when={script(id)}>
-              {(s) => (
-                <button
-                  class="tab"
-                  role="tab"
-                  aria-selected={activeScriptId() === id}
-                  data-tone={tone(runOf(id).state)}
-                  onClick={() => openScript(id)}
-                  onAuxClick={(e) => e.button === 1 && closeTab(id)}
-                  onContextMenu={(e) =>
-                    popupMenu(
-                      [
-                        { label: "Close tab", action: () => closeTab(id) },
-                        { label: "Close other tabs", action: () => tabsOf(pid()).filter((t) => t !== id).forEach(closeTab) },
-                        { separator: true },
-                        { label: "Edit script…", action: () => openInspector(id) },
-                      ],
-                      e,
-                    )
-                  }
-                >
-                  <span class="dot" data-state={runOf(id).state} style={{ width: "7px", height: "7px" }} />
-                  {displayName(s())}
-                  <span
-                    class="tab-close"
-                    role="button"
-                    title="Close tab"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      closeTab(id);
-                    }}
-                  >
-                    <Icon name="x" size={11} />
-                  </span>
-                </button>
-              )}
-            </Show>
-          )}
-        </For>
+        <For each={tabsOf(pid())}>{(key) => <Tab tabKey={key} />}</For>
         <button class="icon-btn" style={{ width: "25px", height: "25px" }} onClick={addMenu} title="Open a script">
           <Icon name="plus" size={13} />
         </button>
       </div>
       <div class="grow" />
+      {/* Terminals view has no view switcher (it is the Figma screen), so the
+          way to the board lives here beside the other view affordances. */}
+      <button class="icon-btn" onClick={() => setView("board")} title="Task board (⌘1)">
+        <Icon name="layers" size={13} />
+      </button>
       <button class="icon-btn" onClick={() => setView("deps")} title="Dependencies">
         <Icon name="graph" size={13} />
       </button>
@@ -223,6 +207,116 @@ function TabBar() {
 }
 
 // ---------------------------------------------------------------- terminal pane
+
+/** A tab is a script run or an agent task run; both are PTYs. */
+function Tab(props: { tabKey: string }) {
+  const isTask = () => isTaskKey(props.tabKey);
+  const t = () => task(taskIdOf(props.tabKey));
+  const s = () => script(props.tabKey);
+  const label = () => (isTask() ? (t()?.title ?? "Task") : s() ? displayName(s()!) : "");
+  const dotTone = () => (isTask() ? taskTone(t()?.status ?? "backlog") : tone(runOf(props.tabKey).state));
+
+  return (
+    <Show when={isTask() ? t() : s()}>
+      <button
+        class="tab"
+        role="tab"
+        aria-selected={activeScriptId() === props.tabKey}
+        data-tone={dotTone()}
+        onClick={() => (isTask() ? openTask(taskIdOf(props.tabKey)) : openScript(props.tabKey))}
+        onAuxClick={(e) => e.button === 1 && closeTab(props.tabKey)}
+        onContextMenu={(e) =>
+          popupMenu(
+            [
+              { label: "Close tab", action: () => closeTab(props.tabKey) },
+              { label: "Close other tabs", action: () => tabsOf(pidOf(props.tabKey)).filter((k) => k !== props.tabKey).forEach(closeTab) },
+              { separator: true },
+              isTask()
+                ? { label: "Edit task…", action: () => openComposer(taskIdOf(props.tabKey)) }
+                : { label: "Edit script…", action: () => openInspector(props.tabKey) },
+            ],
+            e,
+          )
+        }
+      >
+        <span
+          class="dot"
+          {...(isTask() ? { "data-task": dotTone() } : { "data-state": runOf(props.tabKey).state })}
+          style={{ width: "7px", height: "7px" }}
+        />
+        <span class="ellipsis" style={{ "max-width": "180px" }}>
+          {label()}
+        </span>
+        <span
+          class="tab-close"
+          role="button"
+          title="Close tab"
+          onClick={(e) => {
+            e.stopPropagation();
+            closeTab(props.tabKey);
+          }}
+        >
+          <Icon name="x" size={11} />
+        </span>
+      </button>
+    </Show>
+  );
+}
+
+const pidOf = (key: string) => projectOfTab(key) ?? state.ui.projectId!;
+
+/** Header strip for an agent task: what it is, how it's going, what it cost. */
+function TaskBar(props: { taskId: string }) {
+  const t = () => task(props.taskId)!;
+  const run = () => taskRunOf(props.taskId);
+  const a = () => agent(t().agentId);
+  const working = () => t().status === "working" || t().status === "queued" || t().status === "verifying";
+  const elapsed = () => {
+    const r = run();
+    if (!r?.startedAt) return null;
+    return fmtUptime((r.endedAt ?? now()) - r.startedAt);
+  };
+
+  return (
+    <div class="commandbar">
+      <span class="t-medium-12 c-primary ellipsis" title={t().goal}>
+        {t().title}
+      </span>
+      <span class="pill" data-tone={taskTone(t().status) === "review" ? undefined : taskTone(t().status)}>
+        {TASK_STATUS_LABEL[t().status]}
+      </span>
+      <span class="t-caption-11 c-muted nowrap">
+        {a()?.name ?? t().agentId}
+        {t().model ? ` · ${t().model}` : ""}
+        {elapsed() ? ` · ${elapsed()}` : ""}
+        {run()?.turns ? ` · ${run()!.turns} turns` : ""}
+        {fmtCost(run()?.costUsd ?? null) ? ` · ${fmtCost(run()!.costUsd)}` : ""}
+      </span>
+      <div class="grow" />
+      <Show
+        when={working()}
+        fallback={
+          <button class="icon-btn" title={run() ? "Run again" : "Run"} onClick={() => void startTask(props.taskId)}>
+            <Icon name="play" size={14} color="var(--status-running)" />
+          </button>
+        }
+      >
+        <button class="icon-btn" title="Stop agent" onClick={() => void stopTask(props.taskId)}>
+          <Icon name="stop" size={14} color="var(--status-crashed)" />
+        </button>
+      </Show>
+      <button class="icon-btn" title="Edit task" onClick={() => openComposer(props.taskId)}>
+        <Icon name="settings" size={14} />
+      </button>
+      <Show when={t().status === "review"}>
+        <button class="btn btn-secondary btn-sm" style={{ "margin-left": "4px" }} onClick={() => void setTaskStatus(t(), "done")}>
+          <Icon name="check" size={11} color="var(--status-running)" />
+          Mark done
+        </button>
+      </Show>
+    </div>
+  );
+}
 
 function TerminalPane() {
   let stack!: HTMLDivElement;
@@ -258,16 +352,26 @@ function TerminalPane() {
   });
 
   const active = () => activeScriptId();
+  const activeTask = () => (active() && isTaskKey(active()!) ? task(taskIdOf(active()!)) : undefined);
   const idle = () => {
-    const r = active() ? runOf(active()!) : undefined;
-    return !!r && (r.state === "idle" || (r.state === "stopped" && !r.startedAt));
+    if (!active() || isTaskKey(active()!)) return false;
+    const r = runOf(active()!);
+    return r.state === "idle" || (r.state === "stopped" && !r.startedAt);
+  };
+  const taskNotStarted = () => {
+    const t = activeTask();
+    return !!t && !taskRunOf(t.id);
   };
 
   return (
     <section class="terminal-pane">
-      <Show when={active() && script(active()!)}>
-        <CommandBar scriptId={active()!} />
-        <CrashBanner scriptId={active()!} />
+      <Show when={activeTask()} fallback={
+        <Show when={active() && script(active()!)}>
+          <CommandBar scriptId={active()!} />
+          <CrashBanner scriptId={active()!} />
+        </Show>
+      }>
+        <TaskBar taskId={activeTask()!.id} />
       </Show>
       <div class="term-stack" ref={stack}>
         <Show when={state.ui.searchOpen && active()}>
@@ -286,6 +390,18 @@ function TerminalPane() {
             <button class="btn btn-primary" onClick={() => void startScript(active()!)}>
               <Icon name="play" size={12} />
               Start
+            </button>
+          </div>
+        </Show>
+        <Show when={taskNotStarted()}>
+          <div class="term-empty">
+            <p class="t-title-13 c-secondary">{activeTask()!.title}</p>
+            <p class="t-caption-11" style={{ "max-width": "440px" }}>
+              {activeTask()!.goal}
+            </p>
+            <button class="btn btn-primary" onClick={() => void startTask(activeTask()!.id)}>
+              <Icon name="play" size={12} />
+              Run {agent(activeTask()!.agentId)?.name ?? "agent"}
             </button>
           </div>
         </Show>
@@ -479,7 +595,15 @@ function ViewSwitcher() {
   const plan = () => planFor(pid());
   const g = () => selectedGroup(pid());
   const n = () => scopeScripts(pid()).length;
-  const opt = (view: typeof state.ui.view, icon: "terminal" | "graph" | "list", label: string) => (
+  const counts = () => {
+    const list = tasksOf(pid());
+    return {
+      working: list.filter((t) => t.status === "working" || t.status === "queued" || t.status === "verifying").length,
+      review: list.filter((t) => t.status === "review").length,
+      failed: list.filter((t) => t.status === "failed").length,
+    };
+  };
+  const opt = (view: typeof state.ui.view, icon: "terminal" | "graph" | "list" | "layers", label: string) => (
     <button class="seg-opt" aria-pressed={state.ui.view === view} onClick={() => setView(view)}>
       <Icon name={icon} size={13} />
       {label}
@@ -489,19 +613,35 @@ function ViewSwitcher() {
   return (
     <div class="viewswitcher">
       <div class="seg neutral">
+        {opt("board", "layers", "Board")}
         {opt("terminals", "terminal", "Terminals")}
         {opt("deps", "graph", "Dependencies")}
         {opt("log", "list", "Combined log")}
       </div>
       <div class="grow" />
-      <Show when={plan().cycle}>
-        <span class="t-caption-11 c-crashed">cycle · won't start</span>
-        <span class="t-caption-11 c-muted">·</span>
+      <Show
+        when={state.ui.view === "board"}
+        fallback={
+          <>
+            <Show when={plan().cycle}>
+              <span class="t-caption-11 c-crashed">cycle · won't start</span>
+              <span class="t-caption-11 c-muted">·</span>
+            </Show>
+            <span class="t-caption-11 c-muted nowrap">
+              {g() ? `Group “${g()!.name}”` : "All scripts"} · {n()} {n() === 1 ? "script" : "scripts"} ·{" "}
+              {plan().waves.length} {plan().waves.length === 1 ? "wave" : "waves"}
+            </span>
+          </>
+        }
+      >
+        <span class="t-caption-11 c-muted nowrap">
+          {counts().working} working · {counts().review} review
+          <Show when={counts().failed > 0}>
+            {" · "}
+            <span class="c-crashed">{counts().failed} failed</span>
+          </Show>
+        </span>
       </Show>
-      <span class="t-caption-11 c-muted nowrap">
-        {g() ? `Group “${g()!.name}”` : "All scripts"} · {n()} {n() === 1 ? "script" : "scripts"} · {plan().waves.length}{" "}
-        {plan().waves.length === 1 ? "wave" : "waves"}
-      </span>
     </div>
   );
 }
@@ -532,7 +672,7 @@ function CombinedLog() {
 function StatusBar() {
   const pid = () => state.ui.projectId!;
   const counts = () => countsOf(pid());
-  const active = () => activeScriptId();
+  const active = () => (activeScriptId() && !isTaskKey(activeScriptId()!) ? activeScriptId() : null);
   const run = () => (active() ? runOf(active()!) : undefined);
   const stats = () => (active() ? state.stats[active()!] : undefined);
   const shell = () => {

@@ -1,6 +1,7 @@
 //! Scriptr core: runs a project's dev processes in real PTYs with dependency
 //! ordering, readiness gates and restart policies.
 
+pub mod agents;
 mod commands;
 pub mod config;
 pub mod db;
@@ -11,7 +12,9 @@ pub mod model;
 pub mod pty;
 pub mod scheduler;
 mod stats;
+pub mod stream;
 pub mod supervisor;
+pub mod tasks;
 mod watch;
 
 use std::path::{Path, PathBuf};
@@ -22,9 +25,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use crate::db::Db;
-use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot};
+use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot, Task, TaskRun, TaskState};
 use crate::scheduler::Scheduler;
 use crate::supervisor::{EventSink, Supervisor};
+use crate::tasks::TaskRunner;
 use crate::watch::ProjectWatcher;
 
 /// Upper bound on how long quitting waits for processes to stop.
@@ -45,6 +49,10 @@ impl EventSink for TauriEvents {
     fn group_progress(&self, progress: &GroupProgress) {
         let _ = self.0.emit("group:progress", progress);
     }
+
+    fn task_changed(&self, task: &Task, run: Option<&TaskRun>) {
+        let _ = self.0.emit("task:state", TaskState { task: task.clone(), run: run.cloned() });
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -58,6 +66,7 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub sup: Arc<Supervisor>,
     pub sched: Arc<Scheduler>,
+    pub tasks: Arc<TaskRunner>,
     watcher: Mutex<Option<ProjectWatcher>>,
 }
 
@@ -104,8 +113,12 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let db = Arc::new(Db::open(&db::default_path()?)?);
     let events: Arc<dyn EventSink> = Arc::new(TauriEvents(handle.clone()));
-    let sup = Supervisor::new(db.clone(), events.clone());
-    let sched = Scheduler::new(db.clone(), sup.clone(), events);
+    // Scripts and agent tasks share one terminal registry, so both stream
+    // through the same batching and ring buffers.
+    let terminals = Arc::<pty::Terminals>::default();
+    let sup = Supervisor::with_terminals(db.clone(), events.clone(), terminals.clone());
+    let sched = Scheduler::new(db.clone(), sup.clone(), events.clone());
+    let tasks = TaskRunner::new(db.clone(), events, terminals);
 
     let emitter = handle.clone();
     let watcher = ProjectWatcher::new(move |project_id| {
@@ -114,7 +127,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|e| log::warn!("file watching disabled: {e}"))
     .ok();
 
-    let state = Arc::new(AppState { db, sup: sup.clone(), sched, watcher: Mutex::new(watcher) });
+    let state = Arc::new(AppState { db, sup: sup.clone(), sched, tasks, watcher: Mutex::new(watcher) });
     state.sync_watcher();
     app.manage(state);
 
@@ -140,8 +153,12 @@ fn stop_on_quit(app: &AppHandle) {
         return;
     }
     let sup = state.sup.clone();
+    let tasks = state.tasks.clone();
     tauri::async_runtime::block_on(async move {
-        let _ = tokio::time::timeout(QUIT_TIMEOUT, sup.stop_all()).await;
+        let _ = tokio::time::timeout(QUIT_TIMEOUT, async {
+            tokio::join!(sup.stop_all(), tasks.stop_all());
+        })
+        .await;
     });
 }
 
@@ -193,6 +210,16 @@ pub fn run() {
             commands::settings_set,
             commands::db_backup,
             commands::run_history,
+            commands::agent_list,
+            commands::task_list,
+            commands::task_save,
+            commands::task_delete,
+            commands::task_start,
+            commands::task_stop,
+            commands::task_runs,
+            commands::task_attach,
+            commands::task_write,
+            commands::task_resize,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Scriptr application")

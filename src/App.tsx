@@ -5,6 +5,7 @@ import { Workspace } from "./screens/Workspace";
 import { Welcome } from "./screens/Welcome";
 import { Inspector } from "./screens/Inspector";
 import { AddProjectModal } from "./screens/AddProjectModal";
+import { TaskComposer } from "./screens/TaskComposer";
 import { CommandPalette } from "./screens/CommandPalette";
 import { SettingsScreen } from "./screens/Settings";
 import { PopupMenuHost } from "./components/PopupMenuHost";
@@ -57,6 +58,9 @@ export function App() {
       </div>
       <Show when={state.ui.scan}>
         <AddProjectModal scan={state.ui.scan!} />
+      </Show>
+      <Show when={state.ui.composerTaskId !== null && state.ui.projectId}>
+        <TaskComposer taskId={state.ui.composerTaskId!} />
       </Show>
       <Show when={state.ui.paletteOpen}>
         <CommandPalette />

@@ -1,4 +1,4 @@
-import type { Gate, RunInfo, RunState, Script } from "./types";
+import type { Autonomy, Gate, RunInfo, RunState, Script, TaskStatus } from "./types";
 
 export function displayName(s: Pick<Script, "name" | "label">): string {
   return s.label ? `${s.name} · ${s.label}` : s.name;
@@ -121,6 +121,48 @@ export function runBadge(run: RunInfo, now: number): { text: string; tone: strin
     default:
       return null;
   }
+}
+
+/** Task status reuses the status palette: working is live, review wants a human, failed is a crash. */
+export function taskTone(status: TaskStatus): "running" | "starting" | "queued" | "crashed" | "stopped" | "review" {
+  switch (status) {
+    case "working":
+      return "running";
+    case "verifying":
+      return "starting";
+    case "queued":
+      return "queued";
+    case "review":
+      return "review";
+    case "failed":
+      return "crashed";
+    default:
+      return "stopped";
+  }
+}
+
+export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
+  backlog: "Backlog",
+  queued: "Queued",
+  working: "Working",
+  verifying: "Verifying",
+  review: "Needs review",
+  done: "Done",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+export const AUTONOMY_LABEL: Record<Autonomy, string> = {
+  ask: "Ask first",
+  "auto-edit": "Auto-edit",
+  full: "Full autonomy",
+};
+
+export const PRIORITY_LABEL = ["None", "Low", "Medium", "High"];
+
+export function fmtCost(usd: number | null): string | null {
+  if (usd === null) return null;
+  return usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`;
 }
 
 /** "poetry run celery -A acme worker -l info" → "celery worker" (graph node subtitle). */

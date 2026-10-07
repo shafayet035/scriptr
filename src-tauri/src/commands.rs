@@ -10,10 +10,10 @@ use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::State;
 
 use crate::model::{
-    AddProjectInput, Group, HistoryEntry, ImportMode, ImportReport, Plan, Project, RestartPolicy, ScanResult,
-    Script, Settings, Snapshot,
+    now_ms, AddProjectInput, AgentAdapter, Group, HistoryEntry, ImportMode, ImportReport, Plan, Project,
+    RestartPolicy, ScanResult, Script, Settings, Snapshot, Task, TaskRun, TaskStatus,
 };
-use crate::{config, detect, graph, supervisor, AppState};
+use crate::{agents, config, detect, graph, supervisor, AppState};
 
 type Res<T> = Result<T, String>;
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -240,6 +240,82 @@ pub async fn pty_write(state: AppStateRef<'_>, script_id: String, data: String) 
 #[tauri::command]
 pub async fn pty_resize(state: AppStateRef<'_>, script_id: String, cols: u16, rows: u16) -> Res<()> {
     state.sup.resize(&script_id, cols, rows)
+}
+
+// ---- AI tasks (docs/AI-PM.md) ---------------------------------------------
+
+/// Built-in and user adapters, with `available` / `version` resolved.
+#[tauri::command]
+pub async fn agent_list() -> Res<Vec<AgentAdapter>> {
+    let mut all = agents::load(None);
+    agents::resolve(&mut all).await;
+    Ok(all)
+}
+
+#[tauri::command]
+pub async fn task_list(state: AppStateRef<'_>, project_id: String) -> Res<Vec<Task>> {
+    state.db.project_tasks(&project_id)
+}
+
+#[tauri::command]
+pub async fn task_save(state: AppStateRef<'_>, task: Task) -> Res<Task> {
+    let mut task = task;
+    if task.title.trim().is_empty() {
+        return Err("a task needs a title".into());
+    }
+    if task.goal.trim().is_empty() {
+        return Err("a task needs a goal — it is the prompt the agent gets".into());
+    }
+    state.db.project(&task.project_id)?;
+    task.updated_at = now_ms();
+    if task.id.is_empty() {
+        task.id = new_id();
+        task.created_at = task.updated_at;
+        task.status = TaskStatus::Backlog;
+    }
+    state.db.upsert_task(&task)?;
+    Ok(task)
+}
+
+#[tauri::command]
+pub async fn task_delete(state: AppStateRef<'_>, task_id: String) -> Res<()> {
+    let _ = state.tasks.stop(&task_id).await;
+    state.db.delete_task(&task_id)
+}
+
+#[tauri::command]
+pub async fn task_start(state: AppStateRef<'_>, task_id: String) -> Res<()> {
+    state.tasks.start(&task_id).await
+}
+
+#[tauri::command]
+pub async fn task_stop(state: AppStateRef<'_>, task_id: String) -> Res<()> {
+    state.tasks.stop(&task_id).await
+}
+
+#[tauri::command]
+pub async fn task_runs(state: AppStateRef<'_>, task_id: String) -> Res<Vec<TaskRun>> {
+    state.db.task_runs(&task_id)
+}
+
+#[tauri::command]
+pub async fn task_attach(
+    state: AppStateRef<'_>,
+    task_id: String,
+    on_data: Channel<InvokeResponseBody>,
+) -> Res<()> {
+    state.tasks.attach(&task_id, Box::new(move |bytes| on_data.send(InvokeResponseBody::Raw(bytes)).is_ok()));
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn task_write(state: AppStateRef<'_>, task_id: String, data: String) -> Res<()> {
+    state.tasks.write_input(&task_id, data.as_bytes())
+}
+
+#[tauri::command]
+pub async fn task_resize(state: AppStateRef<'_>, task_id: String, cols: u16, rows: u16) -> Res<()> {
+    state.tasks.resize(&task_id, cols, rows)
 }
 
 #[tauri::command]

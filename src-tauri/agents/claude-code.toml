@@ -1,0 +1,35 @@
+# Claude Code — verified against claude 2.1.289 (Oct 2026).
+# `--permission-mode default` is accepted even though `--help` only lists the
+# non-default modes.
+id   = "claude-code"
+name = "Claude Code"
+bin  = "claude"
+
+interactive_args = ["{prompt}"]
+headless_args    = ["-p", "{prompt}", "--output-format", "stream-json", "--verbose"]
+resume_args      = ["--resume", "{session}"]
+model_args       = ["--model", "{model}"]
+
+stream   = "claude-json"
+models   = ["opus", "sonnet", "haiku"]
+docs_url = "https://docs.claude.com/en/docs/claude-code"
+
+[autonomy]
+ask       = ["--permission-mode", "default"]
+auto-edit = ["--permission-mode", "acceptEdits"]
+full      = ["--dangerously-skip-permissions"]
+
+# `--effort` accepts low, medium, high, xhigh, max (claude 2.1.289 --help), so
+# "extra" maps to xhigh. Ultracode is not an effort rung: it is Claude Code's
+# multi-agent mode, opted into by the keyword appearing in the prompt, so it
+# runs at max effort and adds the keyword below.
+[effort]
+low       = ["--effort", "low"]
+medium    = ["--effort", "medium"]
+high      = ["--effort", "high"]
+extra     = ["--effort", "xhigh"]
+max       = ["--effort", "max"]
+ultracode = ["--effort", "max"]
+
+[effort_prompt]
+ultracode = "ultracode"
