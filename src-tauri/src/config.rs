@@ -441,9 +441,9 @@ pub fn import(db: &Db, project_id: &str, path: &Path, mode: ImportMode) -> Resul
         for id in &plan.group_deletes {
             db.delete_group(id)?;
         }
-        for s in &plan.upserts {
-            db.upsert_script(s)?;
-        }
+        // One transaction: an imported script may wait for another that appears
+        // later in the same file, and its dependency row needs both to exist.
+        db.upsert_scripts(&plan.upserts)?;
         for g in &plan.group_upserts {
             db.upsert_group(g)?;
         }
