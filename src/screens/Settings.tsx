@@ -1,7 +1,7 @@
-import { createMemo, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createMemo, createResource, createSignal, For, type JSX, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import { Icon } from "../components/Icon";
 import { popupMenu } from "../lib/menu";
-import { revealInFinder } from "../lib/ipc";
+import { backend, revealInFinder } from "../lib/ipc";
 import { tildify } from "../lib/format";
 import { renderToml, type TomlToken } from "../lib/toml";
 import type { ImportReport, Settings } from "../lib/types";
@@ -16,10 +16,12 @@ import {
   type SettingsSection,
   state,
   setState,
+  toast,
 } from "../store/app";
 
 const NAV: { id: SettingsSection; label: string }[] = [
   { id: "general", label: "General" },
+  { id: "integrations", label: "Integrations" },
   { id: "terminal", label: "Terminal" },
   { id: "shell", label: "Shell & environment" },
   { id: "defaults", label: "Project defaults" },
@@ -61,6 +63,9 @@ export function SettingsScreen() {
             </Match>
             <Match when={state.ui.settingsSection === "general"}>
               <General />
+            </Match>
+            <Match when={state.ui.settingsSection === "integrations"}>
+              <Integrations />
             </Match>
             <Match when={state.ui.settingsSection === "shell"}>
               <Shell />
@@ -218,6 +223,68 @@ function ImportExport() {
           </For>
         </div>
       </section>
+    </>
+  );
+}
+
+/** How an outside coding agent files tasks into Scriptr. */
+function Integrations() {
+  const [info] = createResource(() => backend.mcpInfo().catch(() => null));
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied — run it in a terminal");
+    } catch {
+      toast("Clipboard is not available", "error");
+    }
+  };
+
+  return (
+    <>
+      <Head
+        title="Integrations"
+        body="Let Claude Code — or any MCP client — file tasks into Scriptr from whatever repository it is working in."
+      />
+
+      <Card
+        title="MCP server"
+        body="Scriptr listens on a loopback port for a small bridge process. Tasks filed this way land in the backlog and never start an agent on their own."
+      >
+        <div class="settings-row">
+          <span class="dot" data-task={info()?.running ? "running" : "crashed"} style={{ width: "7px", height: "7px" }} />
+          <span class="t-body-12 c-secondary">
+            <Show when={info()?.running} fallback="Not listening — another process may hold the port">
+              Listening on 127.0.0.1:{info()!.port}
+            </Show>
+          </span>
+        </div>
+        <div class="col" style={{ gap: "6px" }}>
+          <span class="field-label">Register with Claude Code</span>
+          <div class="settings-row">
+            <code class="path-chip selectable grow ellipsis">{info()?.command ?? "…"}</code>
+            <button class="btn btn-secondary btn-sm" disabled={!info()} onClick={() => void copy(info()!.command)}>
+              <Icon name="copy" size={12} />
+              Copy
+            </button>
+          </div>
+          <p class="t-caption-11 c-muted">
+            Then ask Claude Code something like “file a task in Scriptr to fix the flaky webhook test”. It can also list
+            your projects and tasks. The token lives in <span class="t-mono-11">{info()?.configPath ?? "mcp.json"}</span>,
+            readable only by you.
+          </p>
+        </div>
+      </Card>
+
+      <Card
+        title="What an outside agent may do"
+        body="Reading is free; writing is not. These limits are deliberate — a goal written by another agent becomes a prompt for yours."
+      >
+        <div class="col" style={{ gap: "4px" }}>
+          <p class="t-body-12 c-secondary">· File a task — lands in Backlog, ask-first autonomy, labelled with its origin</p>
+          <p class="t-body-12 c-secondary">· List projects, list tasks, read status</p>
+          <p class="t-body-12 c-muted">· It cannot start agents, run scripts, or read your logs</p>
+        </div>
+      </Card>
     </>
   );
 }

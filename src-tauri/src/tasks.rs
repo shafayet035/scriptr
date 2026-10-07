@@ -27,6 +27,87 @@ use crate::supervisor::{EventSink, STOP_GRACE};
 /// How long to wait for trailing output after the agent exits.
 const DRAIN_WAIT: Duration = Duration::from_millis(250);
 
+/// What a caller needs to supply to file a task. Shared by the UI command and
+/// the MCP API so an agent-filed task gets exactly the same validation.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTask {
+    /// project id, name or path
+    pub project: String,
+    pub title: String,
+    pub goal: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<crate::model::Effort>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub issue_url: Option<String>,
+}
+
+/// Creates a backlog task. `origin` records who filed it ("mcp", "mcp-offline").
+///
+/// Anything filed from outside lands in the backlog with ask-first autonomy: a
+/// goal written by another agent becomes a prompt for this one, so a human
+/// reads it before it runs.
+pub fn create(db: &Db, project_id: &str, input: &NewTask, origin: &str) -> Result<Task, String> {
+    let title = input.title.trim();
+    let goal = input.goal.trim();
+    if title.is_empty() {
+        return Err("a task needs a title".into());
+    }
+    if goal.is_empty() {
+        return Err("a task needs a goal — it is the prompt the agent gets".into());
+    }
+    db.project(project_id)?;
+    let agent_id = match &input.agent_id {
+        Some(id) => {
+            let mut all = agents::load(None);
+            all.iter().any(|a| &a.id == id).then(|| id.clone()).ok_or_else(|| {
+                format!("unknown agent \"{id}\" — known: {}", {
+                    all.sort_by(|a, b| a.id.cmp(&b.id));
+                    all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
+                })
+            })?
+        }
+        None => "claude-code".to_string(),
+    };
+    let now = now_ms();
+    let mut labels = input.labels.clone();
+    labels.push(origin.to_string());
+    let task = Task {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id: project_id.to_string(),
+        title: title.to_string(),
+        goal: goal.to_string(),
+        agent_id,
+        model: input.model.clone(),
+        autonomy: crate::model::Autonomy::Ask,
+        effort: input.effort,
+        workspace: WorkspaceMode::InPlace,
+        branch: None,
+        after: vec![],
+        verify: vec![],
+        status: TaskStatus::Backlog,
+        priority: input.priority.unwrap_or(1).clamp(0, 3),
+        assignee: None,
+        labels,
+        issue_url: input.issue_url.clone(),
+        budget_tokens: None,
+        budget_seconds: None,
+        created_at: now,
+        updated_at: now,
+        sort_order: db.project_tasks(project_id).map(|t| t.len() as i64).unwrap_or(0),
+    };
+    db.upsert_task(&task)?;
+    Ok(task)
+}
+
 fn notice(msg: &str) -> Vec<u8> {
     format!("\r\n\x1b[35m[scriptr]\x1b[0m {msg}\r\n").into_bytes()
 }

@@ -517,6 +517,13 @@ export function createMockBackend(): Backend {
       return structuredClone(s);
     },
     dbBackup: async () => {},
+    mcpInfo: async () => ({
+      running: true,
+      port: 7378,
+      command: "claude mcp add --scope user scriptr -- /Applications/Scriptr.app/Contents/MacOS/scriptr-mcp",
+      configPath: "/Users/you/Library/Application Support/scriptr/mcp.json",
+      bin: "/Applications/Scriptr.app/Contents/MacOS/scriptr-mcp",
+    }),
     agentList: async () => structuredClone(agents),
     taskList: async (projectId) => structuredClone(tasks.filter((t) => t.projectId === projectId)),
     taskSave: async (task) => {

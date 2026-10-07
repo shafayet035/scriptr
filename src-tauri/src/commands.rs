@@ -242,6 +242,19 @@ pub async fn pty_resize(state: AppStateRef<'_>, script_id: String, cols: u16, ro
     state.sup.resize(&script_id, cols, rows)
 }
 
+/// Status of the loopback MCP API plus the command that registers the bridge.
+#[tauri::command]
+pub async fn mcp_info(state: AppStateRef<'_>) -> Res<serde_json::Value> {
+    let info = crate::lock(&state.mcp).clone();
+    // Prefer the sidecar next to the running binary (inside the app bundle).
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("scriptr-mcp")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned());
+    Ok(crate::mcp_api::info_json(info.as_ref(), bin))
+}
+
 // ---- AI tasks (docs/AI-PM.md) ---------------------------------------------
 
 /// Built-in and user adapters, with `available` / `version` resolved.

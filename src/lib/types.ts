@@ -280,6 +280,16 @@ export interface TaskRun {
   summary: string | null;
 }
 
+/** Status of the loopback API that the scriptr-mcp bridge talks to. */
+export interface McpInfo {
+  running: boolean;
+  port: number | null;
+  /** the literal `claude mcp add …` line */
+  command: string;
+  configPath: string;
+  bin: string;
+}
+
 export interface RunRecord {
   startedAt: number;
   endedAt: number | null;

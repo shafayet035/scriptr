@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod detect;
 pub mod graph;
+pub mod mcp_api;
 mod menu;
 pub mod model;
 pub mod pty;
@@ -68,6 +69,16 @@ pub struct AppState {
     pub sched: Arc<Scheduler>,
     pub tasks: Arc<TaskRunner>,
     watcher: Mutex<Option<ProjectWatcher>>,
+    /// Set once the loopback MCP API is listening.
+    pub mcp: Mutex<Option<mcp_api::McpInfo>>,
+    events: Arc<dyn EventSink>,
+}
+
+impl AppState {
+    /// A task filed from outside has to reach the board without a reload.
+    pub fn notify_task(&self, task: &Task) {
+        self.events.task_changed(task, None);
+    }
 }
 
 impl AppState {
@@ -118,7 +129,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let terminals = Arc::<pty::Terminals>::default();
     let sup = Supervisor::with_terminals(db.clone(), events.clone(), terminals.clone());
     let sched = Scheduler::new(db.clone(), sup.clone(), events.clone());
-    let tasks = TaskRunner::new(db.clone(), events, terminals);
+
+    let tasks = TaskRunner::new(db.clone(), events.clone(), terminals);
+    let events_for_state = events;
 
     let emitter = handle.clone();
     let watcher = ProjectWatcher::new(move |project_id| {
@@ -127,9 +140,30 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|e| log::warn!("file watching disabled: {e}"))
     .ok();
 
-    let state = Arc::new(AppState { db, sup: sup.clone(), sched, tasks, watcher: Mutex::new(watcher) });
+    let state = Arc::new(AppState {
+        db,
+        sup: sup.clone(),
+        sched,
+        tasks,
+        watcher: Mutex::new(watcher),
+        mcp: Mutex::new(None),
+        events: events_for_state,
+    });
     state.sync_watcher();
-    app.manage(state);
+    app.manage(state.clone());
+
+    // The MCP socket must never delay or break startup: a port collision is
+    // reported in Settings, not fatal.
+    let mcp_state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        match mcp_api::serve(mcp_state.clone(), mcp_api::DEFAULT_PORT).await {
+            Ok(info) => {
+                *lock(&mcp_state.mcp) = Some(info);
+                mcp_api::drain_inbox(&mcp_state.db, &|t| mcp_state.notify_task(t));
+            }
+            Err(e) => log::warn!("mcp api: {e}"),
+        }
+    });
 
     let emitter = handle;
     stats::spawn_sampler(sup, move |stats| {
@@ -220,6 +254,7 @@ pub fn run() {
             commands::task_attach,
             commands::task_write,
             commands::task_resize,
+            commands::mcp_info,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Scriptr application")

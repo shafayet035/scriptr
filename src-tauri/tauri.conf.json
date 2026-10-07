@@ -22,7 +22,10 @@
         "minHeight": 560,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 20 },
+        "trafficLightPosition": {
+          "x": 16,
+          "y": 20
+        },
         "transparent": true,
         "backgroundColor": "#0b0d10",
         "visible": true
@@ -35,7 +38,16 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "category": "DeveloperTool"
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "externalBin": [
+      "binaries/scriptr-mcp"
+    ]
   }
 }

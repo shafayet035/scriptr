@@ -27,6 +27,7 @@ export type SettingsSection =
   | "terminal"
   | "shell"
   | "defaults"
+  | "integrations"
   | "import-export"
   | "shortcuts"
   | "updates"

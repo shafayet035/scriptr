@@ -1,0 +1,22 @@
+[package]
+name = "scriptr-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP bridge: lets a coding agent file tasks into the Scriptr desktop app"
+license = "MIT"
+repository = "https://github.com/shafayet035/scriptr"
+
+[[bin]]
+name = "scriptr-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Deliberately tiny: this binary ships inside the app bundle and runs per MCP
+# client. No tauri, no tokio — blocking HTTP against our own loopback port.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["json"] }
+dirs = "6"
+
+[dev-dependencies]
+serde_json = "1"

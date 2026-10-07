@@ -31,6 +31,8 @@ notify = "8"
 dirs = "6"
 uuid = { version = "1", features = ["v4"] }
 log = "0.4"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["limit"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal", "process"] }

@@ -5,7 +5,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# rust / tauri
+# rust / tauri — the cargo workspace puts build output at the repo root
+/target/
 src-tauri/target/
 src-tauri/gen/schemas/
 
@@ -26,3 +27,6 @@ npm-debug.log*
 pnpm-debug.log*
 .DS_Store
 Thumbs.db
+
+# built sidecar, copied in before `tauri build`
+src-tauri/binaries/

@@ -6,6 +6,7 @@ import type {
   GroupProgress,
   Group,
   ImportReport,
+  McpInfo,
   Plan,
   ProcStats,
   RunInfo,
@@ -57,6 +58,8 @@ export interface Backend {
   settingsSet(settings: Settings): Promise<Settings>;
   dbBackup(dest: string): Promise<void>;
   runHistory(scriptId: string): Promise<RunRecord[]>;
+  /** loopback MCP API status + the command that registers the bridge */
+  mcpInfo(): Promise<McpInfo>;
   // --- AI tasks (docs/AI-PM.md) ---
   agentList(): Promise<AgentAdapter[]>;
   taskList(projectId: string): Promise<Task[]>;
@@ -109,6 +112,7 @@ const tauriBackend: Backend = {
   settingsSet: (settings) => invoke("settings_set", { settings }),
   dbBackup: (dest) => invoke("db_backup", { dest }),
   runHistory: (scriptId) => invoke("run_history", { scriptId }),
+  mcpInfo: () => invoke("mcp_info"),
   agentList: () => invoke("agent_list"),
   taskList: (projectId) => invoke("task_list", { projectId }),
   taskSave: (task) => invoke("task_save", { task }),

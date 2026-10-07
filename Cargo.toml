@@ -1,0 +1,4 @@
+# Two crates: the desktop app, and the stdio MCP bridge an outside agent talks to.
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/scriptr-mcp"]
