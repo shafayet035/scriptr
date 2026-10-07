@@ -3,7 +3,18 @@ import { Icon } from "../../components/Icon";
 import { popupMenu } from "../../lib/menu";
 import { fmtCost, fmtUptime, taskTone } from "../../lib/format";
 import type { Task } from "../../lib/types";
-import { agent, now, openComposer, openTask, selectCard, startTask, state, stopTask, taskRunOf } from "../../store/app";
+import {
+  agent,
+  now,
+  openComposer,
+  openTask,
+  selectCard,
+  showInDeck,
+  startTask,
+  state,
+  stopTask,
+  taskRunOf,
+} from "../../store/app";
 import { isWorking, taskMenu } from "./taskMenu";
 
 /**
@@ -40,11 +51,23 @@ export function TaskCard(props: { task: Task }) {
       data-tone={taskTone(t().status)}
       data-selected={selected()}
       tabIndex={0}
-      onClick={() => selectCard(t().id)}
+      onClick={() => {
+        selectCard(t().id);
+        // Loading the terminal must not yank the board out from under the click.
+        showInDeck(t().id, "load");
+      }}
       onDblClick={() => openTask(t().id)}
       onContextMenu={(e) => popupMenu(taskMenu(t()), e)}
       onKeyDown={(e) => {
-        if (e.key === "Enter") openTask(t().id);
+        if (e.key === " ") {
+          e.preventDefault();
+          selectCard(t().id);
+          showInDeck(t().id, "raise");
+        }
+        if (e.key === "Enter") {
+          selectCard(t().id);
+          showInDeck(t().id, "max");
+        }
         if (e.key === "e") openComposer(t().id);
       }}
     >

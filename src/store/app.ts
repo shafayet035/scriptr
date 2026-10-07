@@ -53,9 +53,20 @@ interface Ui {
   composerTaskId: string | null;
   /** card the board keyboard acts on */
   boardSelection: string | null;
-  /** where each task's terminal lives; the deck lands in the next slice */
+  /** where each task's terminal lives */
   termHome: Record<string, "deck" | "tab">;
+  /** task shown in the agent deck */
+  deckTaskId: string | null;
+  /** rail (just a status strip) · open · max (deck owns the view) */
+  deckState: "rail" | "open" | "max";
+  /** remembered height of the open deck */
+  deckHeight: number;
 }
+
+/** The deck is a 36px status rail until an agent is live or you pick a card. */
+export const DECK_RAIL = 36;
+export const DECK_DEFAULT = 320;
+export const DECK_MIN = 140;
 
 export const SIDEBAR_DEFAULT = 256;
 export const SIDEBAR_MIN = 200;
@@ -115,6 +126,9 @@ export const [state, setState] = createStore<AppState>({
     composerTaskId: null,
     boardSelection: null,
     termHome: {},
+    deckTaskId: null,
+    deckState: "rail",
+    deckHeight: DECK_DEFAULT,
   },
 });
 
@@ -323,7 +337,15 @@ export async function init() {
       return i >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
     });
     setState("taskRuns", task.id, run);
-    if (task.status === "working" || task.status === "queued") ensureTab(taskKey(task.id), false);
+    // A starting agent claims the deck rather than stealing a tab, unless the
+    // user pinned it into Terminals.
+    if (task.status === "working" || task.status === "queued") {
+      if (state.ui.termHome[taskKey(task.id)] === "tab") ensureTab(taskKey(task.id), false);
+      else setState("ui", produce((ui) => {
+        ui.termHome[taskKey(task.id)] = "deck";
+        if (!ui.deckTaskId) ui.deckTaskId = task.id;
+      }));
+    }
   });
   void backend.on("menu", onMenu);
 
@@ -424,6 +446,34 @@ export function terminalFocus(scriptId: string) {
 
 export const setView = (view: View) => setState("ui", { view, settingsOpen: false });
 export const selectCard = (taskId: string | null) => setState("ui", "boardSelection", taskId);
+
+/** Height the deck should occupy right now. */
+export const deckHeight = () =>
+  state.ui.deckState === "rail" ? DECK_RAIL : state.ui.deckState === "max" ? 10_000 : state.ui.deckHeight;
+
+export const setDeckHeight = (px: number) =>
+  setState("ui", "deckHeight", Math.round(Math.max(DECK_MIN, Math.min(px, window.innerHeight * 0.7))));
+
+/**
+ * Show a task in the deck. `load` leaves the deck's height alone (clicking a
+ * card shouldn't yank the board out from under you), `raise` opens it, `max`
+ * hands the view over.
+ */
+export function showInDeck(taskId: string, posture: "load" | "raise" | "max" = "raise") {
+  setState(
+    "ui",
+    produce((ui) => {
+      ui.deckTaskId = taskId;
+      ui.termHome[taskKey(taskId)] = "deck";
+      if (posture === "max") ui.deckState = "max";
+      else if (posture === "raise" || ui.deckState === "rail") ui.deckState = posture === "load" ? ui.deckState : "open";
+      if (posture === "load" && ui.deckState === "rail") ui.deckState = "open";
+    }),
+  );
+}
+
+export const setDeckState = (deckState: Ui["deckState"]) => setState("ui", "deckState", deckState);
+export const toggleDeck = () => setDeckState(state.ui.deckState === "rail" ? "open" : "rail");
 export const selectGroup = (projectId: string, groupId: string | null) => setState("ui", "groupByProject", projectId, groupId);
 export const openInspector = (scriptId: string | null) => setState("ui", "inspectorScriptId", scriptId);
 export const toggleInspector = () => openInspector(state.ui.inspectorScriptId ? null : activeScriptId());
@@ -475,12 +525,25 @@ export const stopEverything = () => attempt(backend.stopEverything());
 
 // ---------------------------------------------------------------- AI tasks
 
+/** From the board the terminal opens in the deck; elsewhere it gets a tab. */
 export function openTask(taskId: string) {
   const t = task(taskId);
   if (!t) return;
   selectProject(t.projectId);
+  if (state.ui.view === "board" || state.ui.termHome[taskKey(taskId)] === "deck") {
+    selectCard(taskId);
+    showInDeck(taskId, "raise");
+    return;
+  }
   ensureTab(taskKey(taskId), true);
   setState("ui", "view", "terminals");
+}
+
+/** Pin a task's terminal into the Terminals view instead of the deck. */
+export function pinTaskToTab(taskId: string) {
+  setState("ui", "termHome", taskKey(taskId), "tab");
+  ensureTab(taskKey(taskId), true);
+  setView("terminals");
 }
 
 export async function startTask(taskId: string) {
@@ -636,6 +699,8 @@ function onMenu(id: string) {
       return void beginAddProject();
     case "new-task":
       return pid && openComposer("");
+    case "toggle-deck":
+      return toggleDeck();
     case "import-toml":
       return pid && void importToml(pid, state.settings.importMode);
     case "export-toml":
@@ -682,7 +747,7 @@ export function handleShortcut(e: KeyboardEvent): boolean {
     : {
         k: "palette", ",": "settings", o: "add-project", w: "close-tab", "1": "view-board", "2": "view-terminals",
         "3": "view-deps", "4": "view-log", f: "find", i: "toggle-inspector", r: "run-group", ".": "stop-group",
-        t: "new-task",
+        t: "new-task", j: "toggle-deck",
       };
   const id = map[k];
   if (!id) return false;

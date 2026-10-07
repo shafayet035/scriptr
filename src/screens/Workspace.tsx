@@ -2,18 +2,18 @@ import { createEffect, createSignal, For, Match, on, onCleanup, onMount, Show, S
 import { Icon } from "../components/Icon";
 import { DependencyView } from "./DependencyView";
 import { BoardCanvas } from "./board/BoardCanvas";
+import { AgentDeck } from "./board/AgentDeck";
+import { TaskBar } from "./board/TaskBar";
 import { popupMenu } from "../lib/menu";
 import {
   displayName,
   fmtBytes,
-  fmtCost,
   fmtDuration,
   fmtUptime,
   gateDescription,
   isLive,
   runBadge,
   taskTone,
-  TASK_STATUS_LABEL,
   tildify,
   tone,
 } from "../lib/format";
@@ -36,9 +36,7 @@ import {
   openComposer,
   openTask,
   projectOfTab,
-  setTaskStatus,
   startTask,
-  stopTask,
   task,
   taskRunOf,
   tasksOf,
@@ -81,7 +79,10 @@ export function Workspace() {
         </Match>
         <Match when={state.ui.view === "board"}>
           <ViewSwitcher />
-          <BoardCanvas />
+          <Show when={state.ui.deckState !== "max"}>
+            <BoardCanvas />
+          </Show>
+          <AgentDeck />
         </Match>
         <Match when={true}>
           <ViewSwitcher />
@@ -264,59 +265,6 @@ function Tab(props: { tabKey: string }) {
 }
 
 const pidOf = (key: string) => projectOfTab(key) ?? state.ui.projectId!;
-
-/** Header strip for an agent task: what it is, how it's going, what it cost. */
-function TaskBar(props: { taskId: string }) {
-  const t = () => task(props.taskId)!;
-  const run = () => taskRunOf(props.taskId);
-  const a = () => agent(t().agentId);
-  const working = () => t().status === "working" || t().status === "queued" || t().status === "verifying";
-  const elapsed = () => {
-    const r = run();
-    if (!r?.startedAt) return null;
-    return fmtUptime((r.endedAt ?? now()) - r.startedAt);
-  };
-
-  return (
-    <div class="commandbar">
-      <span class="t-medium-12 c-primary ellipsis" title={t().goal}>
-        {t().title}
-      </span>
-      <span class="pill" data-tone={taskTone(t().status) === "review" ? undefined : taskTone(t().status)}>
-        {TASK_STATUS_LABEL[t().status]}
-      </span>
-      <span class="t-caption-11 c-muted nowrap">
-        {a()?.name ?? t().agentId}
-        {t().model ? ` · ${t().model}` : ""}
-        {elapsed() ? ` · ${elapsed()}` : ""}
-        {run()?.turns ? ` · ${run()!.turns} turns` : ""}
-        {fmtCost(run()?.costUsd ?? null) ? ` · ${fmtCost(run()!.costUsd)}` : ""}
-      </span>
-      <div class="grow" />
-      <Show
-        when={working()}
-        fallback={
-          <button class="icon-btn" title={run() ? "Run again" : "Run"} onClick={() => void startTask(props.taskId)}>
-            <Icon name="play" size={14} color="var(--status-running)" />
-          </button>
-        }
-      >
-        <button class="icon-btn" title="Stop agent" onClick={() => void stopTask(props.taskId)}>
-          <Icon name="stop" size={14} color="var(--status-crashed)" />
-        </button>
-      </Show>
-      <button class="icon-btn" title="Edit task" onClick={() => openComposer(props.taskId)}>
-        <Icon name="settings" size={14} />
-      </button>
-      <Show when={t().status === "review"}>
-        <button class="btn btn-secondary btn-sm" style={{ "margin-left": "4px" }} onClick={() => void setTaskStatus(t(), "done")}>
-          <Icon name="check" size={11} color="var(--status-running)" />
-          Mark done
-        </button>
-      </Show>
-    </div>
-  );
-}
 
 function TerminalPane() {
   let stack!: HTMLDivElement;

@@ -824,3 +824,100 @@ html.vibrant .settings-nav {
   gap: 12px;
   background: var(--bg-canvas);
 }
+
+/* ---------------------------------------------------------------- agent deck (AI slice 2) */
+.deck {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-terminal);
+  border-top: 1px solid var(--border-subtle);
+}
+.deck[data-state="max"] {
+  flex: 1 1 0;
+}
+.deck-resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  z-index: 10;
+  cursor: row-resize;
+  touch-action: none;
+}
+.deck-resizer::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 2px;
+  background: transparent;
+  transition: background-color 120ms ease 80ms;
+}
+.deck-resizer:hover::after,
+.deck-resizer[data-dragging="true"]::after {
+  background: var(--accent);
+}
+html.row-resizing,
+html.row-resizing * {
+  cursor: row-resize !important;
+  user-select: none !important;
+}
+.deck-rail {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 36px;
+  padding: 0 14px 0 18px;
+  background: var(--bg-rail);
+}
+.deck-rail:hover {
+  background: var(--bg-raised);
+}
+.deck-rail-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: 400 12px/18px var(--font-ui);
+  color: var(--text-secondary);
+  min-width: 0;
+}
+.deck-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 10px 0 8px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+.deck-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font: 400 12px/18px var(--font-ui);
+  color: var(--text-secondary);
+}
+.deck-chip:hover {
+  color: var(--text-primary);
+}
+.deck-chip[aria-selected="true"] {
+  background: var(--bg-terminal);
+  color: var(--text-primary);
+}
+.deck-body {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+}
+.deck-body .term-host .xterm {
+  padding: 10px 14px 10px 18px;
+}
