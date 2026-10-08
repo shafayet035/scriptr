@@ -359,6 +359,16 @@ pub struct Task {
     pub sort_order: i64,
 }
 
+/// Payload of the `tasks:order` event: a project's cards in their new order.
+/// A move renumbers every card in the project, so one card's `task:state` is
+/// not enough to describe it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskOrder {
+    pub project_id: String,
+    pub tasks: Vec<Task>,
+}
+
 /// Payload of the `task:state` event.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

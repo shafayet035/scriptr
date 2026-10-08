@@ -313,6 +313,11 @@ export async function init() {
       return i >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
     });
   });
+  // A move renumbers the whole project, so the board takes the new order
+  // wholesale — whether the move came from a drag here or from an AI client.
+  void backend.on("tasks:order", ({ projectId, tasks }) => {
+    setState("tasks", (list) => [...list.filter((t) => t.projectId !== projectId), ...tasks]);
+  });
   void backend.on("menu", onMenu);
 
   // Cards load after the first paint; they do not block the workspace.

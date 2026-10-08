@@ -26,6 +26,7 @@ export interface EventMap {
   "group:progress": GroupProgress;
   "project:changed": { projectId: string };
   "task:state": { task: Task };
+  "tasks:order": { projectId: string; tasks: Task[] };
   stats: ProcStats[];
   menu: string;
 }

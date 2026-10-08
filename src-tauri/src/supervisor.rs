@@ -43,6 +43,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn group_progress(&self, progress: &GroupProgress);
     /// `task:state`. Defaulted so script-only sinks need no change.
     fn task_changed(&self, _task: &Task) {}
+    /// A project's cards were reordered, or moved between columns.
+    fn tasks_reordered(&self, _project_id: &str, _tasks: &[Task]) {}
 }
 
 /// Whether a script currently satisfies dependents.

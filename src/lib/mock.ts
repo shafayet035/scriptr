@@ -484,7 +484,9 @@ export function createMockBackend(): Backend {
       rest.forEach((t, i) => (t.sortOrder = i));
       tasks.length = 0;
       tasks.push(...rest);
-      return structuredClone(tasks.filter((t) => t.projectId === card.projectId));
+      const order = tasks.filter((t) => t.projectId === card.projectId);
+      emit("tasks:order", { projectId: card.projectId, tasks: structuredClone(order) });
+      return structuredClone(order);
     },
     runHistory: async (scriptId) => {
       const r = runs.get(scriptId);

@@ -299,7 +299,12 @@ pub async fn task_move(
     status: TaskStatus,
     before: Option<String>,
 ) -> Res<Vec<Task>> {
-    crate::tasks::move_task(&state.db, &task_id, status, before.as_deref())
+    let project_id = state.db.task(&task_id)?.project_id;
+    let order = crate::tasks::move_task(&state.db, &task_id, status, before.as_deref())?;
+    // The caller applies the returned order itself; the event is for every
+    // other view of the same board.
+    state.notify_order(&project_id, &order);
+    Ok(order)
 }
 
 #[tauri::command]

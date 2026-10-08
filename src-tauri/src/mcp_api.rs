@@ -78,13 +78,19 @@ pub fn remove_config() {
 type Fut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 /// Reads recent output for a `script:<id>` or `task:<id>` key.
 type LogReader = Arc<dyn Fn(&str, usize) -> Result<String, String> + Send + Sync>;
-/// Moves a card to a column and a position within it.
-type CardMover = Arc<dyn Fn(String, TaskStatus, Option<String>) -> Fut<Result<(), String>> + Send + Sync>;
+/// Moves a card to a column and a position within it, returning the project's
+/// cards in their new order.
+type CardMover = Arc<dyn Fn(String, TaskStatus, Option<String>) -> Fut<Result<Vec<Task>, String>> + Send + Sync>;
+/// Announces a project's new card order to the UI.
+type OrderSink = Arc<dyn Fn(&str, &[Task]) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Hooks {
     pub running_scripts: Arc<dyn Fn() -> usize + Send + Sync>,
     pub on_task: Arc<dyn Fn(&Task) + Send + Sync>,
+    /// Announces a project's new card order, so the board redraws without a
+    /// manual refresh. The counterpart of `on_task` for a move.
+    pub on_order: OrderSink,
     pub move_task: CardMover,
     /// Live state for one script.
     pub run_info: Arc<dyn Fn(&str) -> RunInfo + Send + Sync>,
@@ -102,7 +108,8 @@ impl Hooks {
         Self {
             running_scripts: Arc::new(|| 0),
             on_task: Arc::new(|_| {}),
-            move_task: Arc::new(|_, _, _| Box::pin(async { Ok(()) })),
+            on_order: Arc::new(|_, _| {}),
+            move_task: Arc::new(|_, _, _| Box::pin(async { Ok(Vec::new()) })),
             run_info: Arc::new(RunInfo::idle),
             start_script: Arc::new(|_| Ok(())),
             stop_script: Arc::new(|_| Box::pin(async {})),
@@ -150,12 +157,16 @@ pub async fn serve(app: Arc<AppState>, port: u16) -> Result<McpInfo, String> {
             let app = app.clone();
             Arc::new(move |t: &Task| app.notify_task(t))
         },
+        on_order: {
+            let app = app.clone();
+            Arc::new(move |project_id: &str, tasks: &[Task]| app.notify_order(project_id, tasks))
+        },
         move_task: {
             let db = app.db.clone();
             Arc::new(move |id: String, status: TaskStatus, before: Option<String>| {
                 let db = db.clone();
-                Box::pin(async move { crate::tasks::move_task(&db, &id, status, before.as_deref()).map(drop) })
-                    as Fut<Result<(), String>>
+                Box::pin(async move { crate::tasks::move_task(&db, &id, status, before.as_deref()) })
+                    as Fut<Result<Vec<Task>, String>>
             })
         },
         run_info: {
@@ -408,8 +419,11 @@ async fn move_task(
 ) -> ApiResult<Task> {
     authed(&api, &headers)?;
     let mv: MoveTask = parse_body(&body)?;
-    api.db.task(&id).map_err(not_found)?;
-    (api.hooks.move_task)(id.clone(), mv.status, mv.before).await.map_err(bad)?;
+    let project_id = api.db.task(&id).map_err(not_found)?.project_id;
+    let order = (api.hooks.move_task)(id.clone(), mv.status, mv.before).await.map_err(bad)?;
+    // Without this the card moves in the database and the board goes on showing
+    // the old column until something else happens to reload it.
+    (api.hooks.on_order)(&project_id, &order);
     api.db.task(&id).map(Json).map_err(bad)
 }
 

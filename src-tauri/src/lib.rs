@@ -24,7 +24,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use crate::db::Db;
-use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot, Task, TaskState};
+use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot, Task, TaskOrder, TaskState};
 use crate::scheduler::Scheduler;
 use crate::supervisor::{EventSink, Supervisor};
 use crate::watch::ProjectWatcher;
@@ -51,6 +51,13 @@ impl EventSink for TauriEvents {
     fn task_changed(&self, task: &Task) {
         let _ = self.0.emit("task:state", TaskState { task: task.clone() });
     }
+
+    fn tasks_reordered(&self, project_id: &str, tasks: &[Task]) {
+        let _ = self.0.emit(
+            "tasks:order",
+            TaskOrder { project_id: project_id.to_string(), tasks: tasks.to_vec() },
+        );
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -74,6 +81,12 @@ impl AppState {
     /// A task filed from outside has to reach the board without a reload.
     pub fn notify_task(&self, task: &Task) {
         self.events.task_changed(task);
+    }
+
+    /// A move changes every card's position, so the board is told the whole
+    /// project's order rather than one card's new column.
+    pub fn notify_order(&self, project_id: &str, tasks: &[Task]) {
+        self.events.tasks_reordered(project_id, tasks);
     }
 }
 

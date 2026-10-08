@@ -14,6 +14,8 @@ struct Harness {
     notified: Arc<Mutex<Vec<String>>>,
     /// What the app was asked to do, in order.
     acted: Arc<Mutex<Vec<String>>>,
+    /// Card orders announced to the UI.
+    announced: Arc<Mutex<Vec<String>>>,
 }
 
 async fn setup() -> Harness {
@@ -30,6 +32,7 @@ async fn setup() -> Harness {
     let notified = Arc::new(Mutex::new(Vec::new()));
     let seen = notified.clone();
     let acted = Arc::new(Mutex::new(Vec::new()));
+    let announced = Arc::new(Mutex::new(Vec::new()));
 
     let mut hooks = Hooks::none();
     hooks.running_scripts = Arc::new(|| 3);
@@ -52,9 +55,15 @@ async fn setup() -> Harness {
         let db = db.clone();
         Arc::new(move |id: String, status, before: Option<String>| {
             let db = db.clone();
-            Box::pin(async move {
-                scriptr_lib::tasks::move_task(&db, &id, status, before.as_deref()).map(drop)
-            }) as _
+            Box::pin(async move { scriptr_lib::tasks::move_task(&db, &id, status, before.as_deref()) }) as _
+        })
+    };
+    hooks.on_order = {
+        let seen = announced.clone();
+        Arc::new(move |project_id: &str, tasks: &[Task]| {
+            seen.lock()
+                .unwrap()
+                .push(format!("{project_id}: {}", tasks.iter().map(|t| t.title.as_str()).collect::<Vec<_>>().join(",")))
         })
     };
     hooks.logs = Arc::new(|key: &str, lines: usize| Ok(format!("{key}: {lines} lines requested\nsecond line")));
@@ -66,7 +75,7 @@ async fn setup() -> Harness {
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    Harness { db, base: format!("http://127.0.0.1:{port}"), token, notified, acted }
+    Harness { db, base: format!("http://127.0.0.1:{port}"), token, notified, acted, announced }
 }
 
 impl Harness {
@@ -373,6 +382,14 @@ async fn moving_a_card_sets_its_column_and_its_place() {
     let order: Vec<String> = h.db.project_tasks("p1").unwrap().into_iter().map(|t| t.title).collect();
     assert_eq!(order, ["B", "A"], "the card moved to the front");
     assert_eq!(h.db.task(&b).unwrap().status, TaskStatus::Doing);
+
+    // The board has to hear about it, or the card moves in the database and the
+    // UI keeps showing the old column until something reloads it.
+    assert_eq!(
+        h.announced.lock().unwrap().as_slice(),
+        ["p1: B,A"],
+        "a move must announce the project's new order"
+    );
 
     // A column is required; a missing one is a bad request, not a silent default.
     let (code, _) = h.post(&format!("/v1/tasks/{a}/move"), Some(&h.token), serde_json::json!({})).await;
