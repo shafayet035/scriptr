@@ -252,6 +252,13 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
             "annotations": {"readOnlyHint": true}
         },
         {
+            "name": "publish_task",
+            "title": "Open a pull request for a task",
+            "description": "Commits whatever the agent left uncommitted on the task's branch, pushes it, and opens a pull request against the task's base branch. Only works for a task running on its own branch. Safe to call twice: an existing PR is reused rather than duplicated.",
+            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
+        },
+        {
             "name": "list_groups",
             "title": "List Scriptr groups",
             "description": "Named groups of scripts a project can bring up together, with how many scripts each holds.",
@@ -396,6 +403,19 @@ fn call_tool(name: &str, args: &Value) -> Value {
                 Call::Offline(why) | Call::Failed(why) => text_result(why, true),
             }
         }
+        "publish_task" => {
+            let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
+            match request("POST", &format!("/v1/tasks/{}/publish", urlencode(&id)), Some(json!({}))) {
+                Call::Ok(v) => text_result(
+                    match v["prUrl"].as_str() {
+                        Some(url) => format!("{}\n\nPull request: {url}", v["did"].as_str().unwrap_or("published")),
+                        None => v["did"].as_str().unwrap_or("published").to_string(),
+                    },
+                    false,
+                ),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
         "list_scripts" => {
             let path = match args.get("project").and_then(Value::as_str) {
                 Some(p) => format!("/v1/scripts?project={}", urlencode(p)),
@@ -532,7 +552,7 @@ fn describe_task(v: &Value) -> String {
         v["goal"].as_str().unwrap_or("?"),
         v["agentId"].as_str().unwrap_or("?"),
     );
-    for (label, key) in [("effort", "effort"), ("branch", "branch"), ("base", "baseBranch")] {
+    for (label, key) in [("effort", "effort"), ("branch", "branch"), ("base", "baseBranch"), ("pull request", "prUrl")] {
         if let Some(x) = v[key].as_str() {
             out += &format!("\n  {label}: {x}");
         }

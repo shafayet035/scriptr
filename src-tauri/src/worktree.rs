@@ -161,6 +161,61 @@ pub fn commits_ahead(path: &Path, base: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Stages everything and commits it. `Ok(None)` when there was nothing to
+/// commit, which is not a failure: a well-behaved agent commits its own work.
+pub fn commit_all(path: &Path, message: &str) -> Result<Option<String>, String> {
+    if dirty(path).is_empty() {
+        return Ok(None);
+    }
+    git(path, &["add", "-A"])?;
+    // -c so a user without a configured identity still gets a commit, rather
+    // than a failure three steps into an unattended pipeline.
+    git(
+        path,
+        &[
+            "-c",
+            "user.name=Scriptr",
+            "-c",
+            "user.email=scriptr@localhost",
+            "commit",
+            "--no-verify",
+            "-m",
+            message,
+        ],
+    )?;
+    git(path, &["rev-parse", "HEAD"]).map(Some)
+}
+
+/// The remote to push to: `origin` when it exists, else the only one there is.
+pub fn default_remote(path: &Path) -> Option<String> {
+    let out = git(path, &["remote"]).ok()?;
+    let names: Vec<&str> = out.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    names
+        .iter()
+        .find(|n| **n == "origin")
+        .or_else(|| names.first())
+        .map(|n| n.to_string())
+}
+
+/// Pushes the branch and sets its upstream. Force is never used: if the remote
+/// has commits this branch does not, that is a conflict for a human.
+pub fn push(path: &Path, branch: &str, remote: &str) -> Result<(), String> {
+    git(path, &["push", "--set-upstream", remote, branch]).map(drop)
+}
+
+/// Commit subjects on the branch but not on `base`, newest first — the raw
+/// material for a PR body.
+pub fn log_since(path: &Path, base: &str, limit: usize) -> Vec<String> {
+    git(path, &["log", "--format=%s", &format!("{base}..HEAD"), &format!("-{limit}")])
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+/// Files changed against `base`, for a PR body's summary.
+pub fn diff_stat(path: &Path, base: &str) -> Option<String> {
+    git(path, &["diff", "--shortstat", &format!("{base}...HEAD")]).ok().filter(|s| !s.trim().is_empty())
+}
+
 /// Tears the checkout down. Refuses while work is uncommitted unless `force`,
 /// since nothing has pushed it anywhere yet.
 pub fn remove(project_dir: &Path, task_id: &str, force: bool) -> Result<(), String> {
@@ -303,6 +358,63 @@ mod tests {
         let err = ensure(&dir, "task-plain-1", "Anything", None).unwrap_err();
         assert!(err.contains("not a git repository"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn committing_is_a_no_op_when_the_agent_already_committed() {
+        let repo = Repo::new("commit");
+        let wt = ensure(&repo.0, "task-c-1", "Work", None).unwrap();
+
+        assert_eq!(commit_all(&wt.path, "scriptr: nothing").unwrap(), None, "a clean tree commits nothing");
+
+        std::fs::write(wt.path.join("feature.txt"), "done\n").unwrap();
+        let sha = commit_all(&wt.path, "scriptr: Work").unwrap().expect("a commit");
+        assert_eq!(sha.len(), 40, "{sha}");
+        assert!(dirty(&wt.path).is_empty(), "everything was staged");
+        assert_eq!(commits_ahead(&wt.path, "main"), 1);
+        assert_eq!(log_since(&wt.path, "main", 10), vec!["scriptr: Work".to_string()]);
+        assert!(diff_stat(&wt.path, "main").is_some_and(|s| s.contains("1 file")));
+
+        // Twice in a row must not produce an empty second commit.
+        assert_eq!(commit_all(&wt.path, "scriptr: again").unwrap(), None);
+        assert_eq!(commits_ahead(&wt.path, "main"), 1);
+        remove(&repo.0, "task-c-1", true).unwrap();
+    }
+
+    #[test]
+    fn pushing_sends_the_branch_to_the_remote() {
+        let repo = Repo::new("push");
+        // A bare repository standing in for GitHub.
+        let bare = repo.0.with_extension("git");
+        let _ = std::fs::remove_dir_all(&bare);
+        Command::new("git").args(["init", "--bare", &bare.to_string_lossy()]).output().unwrap();
+        Command::new("git")
+            .args(["remote", "add", "origin", &bare.to_string_lossy()])
+            .current_dir(&repo.0)
+            .output()
+            .unwrap();
+
+        let wt = ensure(&repo.0, "task-p-1", "Add a thing", None).unwrap();
+        assert_eq!(default_remote(&wt.path).as_deref(), Some("origin"));
+        std::fs::write(wt.path.join("thing.txt"), "x\n").unwrap();
+        commit_all(&wt.path, "scriptr: Add a thing").unwrap();
+        push(&wt.path, &wt.branch, "origin").unwrap();
+
+        // The remote really has the branch now.
+        let out = Command::new("git").args(["branch", "--format=%(refname:short)"]).current_dir(&bare).output().unwrap();
+        let branches = String::from_utf8_lossy(&out.stdout);
+        assert!(branches.lines().any(|b| b.trim() == wt.branch), "{branches}");
+
+        remove(&repo.0, "task-p-1", true).unwrap();
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn a_repository_with_no_remote_has_nothing_to_push_to() {
+        let repo = Repo::new("noremote");
+        let wt = ensure(&repo.0, "task-nr-1", "Work", None).unwrap();
+        assert_eq!(default_remote(&wt.path), None);
+        remove(&repo.0, "task-nr-1", true).unwrap();
     }
 
     #[test]

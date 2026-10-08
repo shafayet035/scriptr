@@ -32,6 +32,7 @@ Settings → Integrations shows the exact line, with the port it is actually on.
 | `update_task` | move, re-prioritise, retarget or rewrite a filed task |
 | `start_task` | run a task's agent now — **gated**, see below |
 | `stop_task` | stop a running agent, signalling its process group |
+| `publish_task` | commit, push and open the PR for a task's branch — reuses an existing PR |
 
 `file_task` works while Scriptr is closed: the bridge spools to an inbox the app
 drains at launch, so a filed task is never lost to a quit app.
@@ -41,6 +42,10 @@ drains at launch, so a filed task is never lost to a quit app.
 Reading is free. Running the user's own configured scripts is allowed — those
 are commands they wrote themselves, and the value of this integration is an
 agent that can bring the stack up and read the failure.
+
+Publishing is *not* gated: it pushes a branch the agent already wrote and opens
+a PR nobody has merged. The line is drawn at spending money and at merging —
+Scriptr never merges on its own.
 
 **Starting an agent run is gated.** `start_task` spends tokens and edits code,
 and the point of filing to a board is that a human sees the work before it

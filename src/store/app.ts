@@ -99,7 +99,7 @@ export const [state, setState] = createStore<AppState>({
   projects: [],
   scripts: [],
   groups: [],
-  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false },
+  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false, publishOnSuccess: true },
   dbPath: "",
   runs: {},
   agents: [],
@@ -572,6 +572,16 @@ export async function deleteTask(taskId: string) {
 
 export const setTaskStatus = (t: Task, status: Task["status"]) => saveTask({ ...t, status });
 
+/** Commits, pushes and opens the PR, reporting what happened either way. */
+export async function publishTask(taskId: string) {
+  const what = await attempt(backend.taskPublish(taskId));
+  if (what === undefined) return;
+  toast(what, "info");
+  // The PR url lands on the task, so refresh it from the backend.
+  const list = await attempt(backend.taskList(state.ui.projectId!));
+  if (list) setState("tasks", reconcile(list, { key: "id" }));
+}
+
 /** The task's isolated checkout, or null when it has none. */
 export const taskWorkspace = (taskId: string) => backend.taskWorkspace(taskId);
 
@@ -603,7 +613,7 @@ export function newTaskDraft(projectId: string): Task {
   const preferred = state.agents.find((a) => a.available) ?? state.agents[0];
   return {
     id: "", projectId, title: "", goal: "", agentId: preferred?.id ?? "", model: null,
-    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, baseBranch: null, after: [], verify: [],
+    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, baseBranch: null, prUrl: null, prNumber: null, after: [], verify: [],
     status: "backlog", priority: 1, assignee: preferred ? `agent:${preferred.id}` : null, labels: [],
     issueUrl: null, budgetTokens: null, budgetSeconds: null,
     createdAt: Date.now(), updatedAt: Date.now(), sortOrder: tasksOf(projectId).length,

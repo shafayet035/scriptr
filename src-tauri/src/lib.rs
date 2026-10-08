@@ -11,6 +11,7 @@ pub mod mcp_api;
 mod menu;
 pub mod model;
 pub mod pty;
+pub mod publish;
 pub mod scheduler;
 mod stats;
 pub mod stream;
@@ -259,6 +260,7 @@ pub fn run() {
             commands::project_branches,
             commands::task_workspace,
             commands::task_workspace_discard,
+            commands::task_publish,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Scriptr application")

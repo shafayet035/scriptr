@@ -195,6 +195,15 @@ pub struct Settings {
     /// never need it.
     #[serde(default)]
     pub mcp_agent_control: bool,
+    /// After an isolated task's agent exits 0, commit, push and open a PR.
+    /// Only ever applies to worktree tasks: Scriptr never commits in the
+    /// checkout you have open.
+    #[serde(default = "yes")]
+    pub publish_on_success: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -205,6 +214,7 @@ impl Default for Settings {
             import_mode: ImportMode::Merge,
             default_shell: default_shell(),
             mcp_agent_control: false,
+            publish_on_success: true,
         }
     }
 }
@@ -344,6 +354,8 @@ pub enum TaskStatus {
     Queued,
     Working,
     Verifying,
+    /// Committing, pushing and opening the PR.
+    Publishing,
     Review,
     Done,
     Failed,
@@ -478,6 +490,9 @@ pub struct Task {
     /// branch the work is cut from, and later targeted by its PR.
     /// None = the repository's current branch when the task starts.
     pub base_branch: Option<String>,
+    /// the pull request opened for this task's branch, once there is one
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
     /// later (D): task ids this task starts after
     pub after: Vec<String>,
     /// later (C): script ids that must pass for the task to count as done

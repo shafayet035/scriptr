@@ -86,7 +86,7 @@ export function createMockBackend(): Backend {
     { id: "g2", projectId: "p1", name: "Backend only", scriptIds: ["api", "worker"] },
   ];
 
-  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false };
+  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false, publishOnSuccess: true };
 
   // ---- AI agents & tasks (docs/AI-PM.md slice A) ----
   const agent = (
@@ -125,7 +125,7 @@ export function createMockBackend(): Backend {
   ];
 
   const mkTask = (p: Partial<Task> & Pick<Task, "id" | "projectId" | "title" | "goal" | "agentId">): Task => ({
-    model: null, autonomy: "ask", effort: null, workspace: "in-place", branch: null, baseBranch: null, after: [], verify: [], status: "backlog",
+    model: null, autonomy: "ask", effort: null, workspace: "in-place", branch: null, baseBranch: null, prUrl: null, prNumber: null, after: [], verify: [], status: "backlog",
     priority: 1, assignee: null, labels: [], issueUrl: null, budgetTokens: null, budgetSeconds: null,
     createdAt: t0 - 86_400_000, updatedAt: t0 - 3_600_000, sortOrder: 0, ...p,
   });
@@ -551,6 +551,12 @@ export function createMockBackend(): Backend {
       };
     },
     taskWorkspaceDiscard: async () => {},
+    taskPublish: async (taskId) => {
+      const t = taskOf(taskId);
+      t.prUrl = `https://github.com/you/${t.projectId}/pull/42`;
+      t.prNumber = 42;
+      return `pushed ${t.branch} · ${t.prUrl}`;
+    },
     taskStart: async (taskId) => {
       const t = taskOf(taskId);
       const a = agents.find((x) => x.id === t.agentId);

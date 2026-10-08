@@ -215,7 +215,8 @@ fn the_handshake_and_tool_list_are_stable() {
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     for want in [
         "file_task", "list_projects", "list_tasks", "scriptr_status", "get_task", "update_task",
-        "start_task", "stop_task", "list_scripts", "control_script", "run_group", "get_logs", "list_groups",
+        "start_task", "stop_task", "publish_task", "list_scripts", "control_script", "run_group", "get_logs",
+        "list_groups",
     ] {
         assert!(names.contains(&want), "{want} is missing from tools/list: {names:?}");
     }

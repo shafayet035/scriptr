@@ -58,6 +58,13 @@ async fn setup() -> Harness {
             Box::pin(async { Ok(()) }) as _
         })
     };
+    hooks.publish_task = {
+        let log = acted.clone();
+        Arc::new(move |id: String| {
+            log.lock().unwrap().push(format!("publish {id}"));
+            Box::pin(async { Ok("pushed scriptr/x".to_string()) }) as _
+        })
+    };
     hooks.logs = Arc::new(|key: &str, lines: usize| Ok(format!("{key}: {lines} lines requested\nsecond line")));
     hooks.agent_control = {
         let gate = gate.clone();
@@ -402,4 +409,22 @@ fn script(id: &str, project: &str, name: &str) -> scriptr_lib::model::Script {
         source: None,
         sort_order: 0,
     }
+}
+
+#[tokio::test]
+async fn publishing_is_not_gated_the_way_starting_a_run_is() {
+    let h = setup().await;
+    let id = file(&h, "Ready to ship").await;
+
+    // No agent_control, on purpose: pushing a branch and opening a PR spends
+    // nothing and merges nothing, so it does not need the gate.
+    let (code, body) = h.post(&format!("/v1/tasks/{id}/publish"), Some(&h.token), serde_json::json!({})).await;
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("pushed scriptr/x"), "{body}");
+    assert_eq!(h.acted(), vec![format!("publish {id}")]);
+
+    let (code, _) = h.post("/v1/tasks/nope/publish", Some(&h.token), serde_json::json!({})).await;
+    assert_eq!(code, 404);
+    let (code, _) = h.post(&format!("/v1/tasks/{id}/publish"), None, serde_json::json!({})).await;
+    assert_eq!(code, 401);
 }

@@ -93,6 +93,8 @@ pub struct Hooks {
     pub logs: LogReader,
     pub start_task: Arc<dyn Fn(String) -> Fut<Result<(), String>> + Send + Sync>,
     pub stop_task: Arc<dyn Fn(String) -> Fut<Result<(), String>> + Send + Sync>,
+    /// Commits, pushes and opens the PR; returns what it did.
+    pub publish_task: Arc<dyn Fn(String) -> Fut<Result<String, String>> + Send + Sync>,
     /// Whether the user has allowed agent runs to be started from outside.
     pub agent_control: Arc<dyn Fn() -> bool + Send + Sync>,
 }
@@ -111,6 +113,7 @@ impl Hooks {
             logs: Arc::new(|_, _| Ok(String::new())),
             start_task: Arc::new(|_| Box::pin(async { Ok(()) })),
             stop_task: Arc::new(|_| Box::pin(async { Ok(()) })),
+            publish_task: Arc::new(|_| Box::pin(async { Ok(String::new()) })),
             agent_control: Arc::new(|| false),
         }
     }
@@ -130,6 +133,7 @@ pub fn router(db: Arc<crate::db::Db>, token: String, hooks: Hooks) -> Router {
         .route("/v1/tasks/{id}", get(get_task).patch(update_task))
         .route("/v1/tasks/{id}/start", post(start_task))
         .route("/v1/tasks/{id}/stop", post(stop_task))
+        .route("/v1/tasks/{id}/publish", post(publish_task))
         .route("/v1/scripts", get(list_scripts))
         .route("/v1/scripts/{id}/start", post(start_script))
         .route("/v1/scripts/{id}/stop", post(stop_script))
@@ -207,6 +211,16 @@ pub async fn serve(app: Arc<AppState>, port: u16) -> Result<McpInfo, String> {
             Arc::new(move |id: String| {
                 let tasks = tasks.clone();
                 Box::pin(async move { tasks.stop(&id).await }) as Fut<Result<(), String>>
+            })
+        },
+        publish_task: {
+            let (tasks, db) = (app.tasks.clone(), app.db.clone());
+            Arc::new(move |id: String| {
+                let (tasks, db) = (tasks.clone(), db.clone());
+                Box::pin(async move {
+                    let mut task = db.task(&id)?;
+                    tasks.publish_now(&mut task).await
+                }) as Fut<Result<String, String>>
             })
         },
         agent_control: {
@@ -465,6 +479,22 @@ async fn stop_task(
     api.db.task(&id).map_err(not_found)?;
     (api.hooks.stop_task)(id.clone()).await.map_err(bad)?;
     api.db.task(&id).map(Json).map_err(bad)
+}
+
+/// Publishing is not gated: it pushes a branch the agent already wrote and
+/// opens a PR nobody has merged. The gate is on *merging*, which Scriptr never
+/// does on its own, and on starting runs, which spends money.
+async fn publish_task(
+    State(api): ApiState,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    _body: axum::body::Bytes,
+) -> ApiResult<serde_json::Value> {
+    authed(&api, &headers)?;
+    api.db.task(&id).map_err(not_found)?;
+    let what = (api.hooks.publish_task)(id.clone()).await.map_err(bad)?;
+    let task = api.db.task(&id).map_err(bad)?;
+    Ok(Json(json!({ "did": what, "prUrl": task.pr_url, "prNumber": task.pr_number })))
 }
 
 // ---- scripts and groups --------------------------------------------------

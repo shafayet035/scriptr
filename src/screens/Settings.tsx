@@ -287,6 +287,16 @@ function Integrations() {
           <p class="t-body-12 c-secondary">· Move, re-prioritise and retarget tasks it has filed</p>
           <p class="t-body-12 c-muted">· It cannot delete anything, edit your scripts, or change these settings</p>
         </div>
+        <button class="settings-row toggle-row" onClick={() => set({ publishOnSuccess: !state.settings.publishOnSuccess })}>
+          <span class="toggle" role="switch" aria-checked={state.settings.publishOnSuccess} />
+          <span class="col" style={{ gap: "2px", "text-align": "left" }}>
+            <span class="t-medium-12 c-primary">Open a pull request when a task succeeds</span>
+            <span class="t-caption-11 c-muted">
+              For tasks on their own branch only — Scriptr never commits in the checkout you have open. Commits what the
+              agent left, pushes the branch, and opens a PR against the task's base with gh.
+            </span>
+          </span>
+        </button>
         <button
           class="settings-row toggle-row"
           onClick={() => set({ mcpAgentControl: !state.settings.mcpAgentControl })}

@@ -373,6 +373,17 @@ pub async fn task_workspace(state: AppStateRef<'_>, task_id: String) -> Res<Opti
     .map_err(|e| format!("reading the workspace panicked: {e}"))
 }
 
+/// Commits, pushes and opens the PR for a task, by hand. Used to retry after a
+/// publish failed, or when automatic publishing is off.
+#[tauri::command]
+pub async fn task_publish(state: AppStateRef<'_>, task_id: String) -> Res<String> {
+    let mut task = state.db.task(&task_id)?;
+    if state.tasks.is_running(&task_id) {
+        return Err("the agent is still running — stop it first".into());
+    }
+    state.tasks.publish_now(&mut task).await
+}
+
 /// Discards a task's checkout. `force` is required while work is uncommitted.
 #[tauri::command]
 pub async fn task_workspace_discard(state: AppStateRef<'_>, task_id: String, force: bool) -> Res<()> {

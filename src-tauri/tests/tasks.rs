@@ -62,9 +62,11 @@ fn git_init(dir: &PathBuf) {
     run(&["commit", "-m", "first"]);
 }
 
-fn task(goal: &str) -> Task {
+/// Each test needs its own id: a worktree's path is derived from it, and the
+/// tests run in parallel.
+fn task_named(id: &str, goal: &str) -> Task {
     Task {
-        id: "t1".into(),
+        id: id.into(),
         project_id: "p".into(),
         title: "test task".into(),
         goal: goal.into(),
@@ -75,6 +77,8 @@ fn task(goal: &str) -> Task {
         workspace: WorkspaceMode::InPlace,
         branch: None,
         base_branch: None,
+        pr_url: None,
+        pr_number: None,
         after: vec![],
         verify: vec![],
         status: TaskStatus::Backlog,
@@ -90,11 +94,16 @@ fn task(goal: &str) -> Task {
     }
 }
 
+fn task(goal: &str) -> Task {
+    task_named("t1", goal)
+}
+
 struct Harness {
     db: Arc<Db>,
     runner: Arc<TaskRunner>,
     events: Arc<Recorder>,
     output: Arc<Mutex<Vec<u8>>>,
+    id: String,
     _dir: PathBuf,
 }
 
@@ -119,16 +128,16 @@ fn setup(name: &str, task: Task) -> Harness {
         sink.lock().unwrap().extend_from_slice(&bytes);
         true
     }));
-    Harness { db, runner, events, output, _dir: dir }
+    Harness { db, runner, events, output, id: task.id.clone(), _dir: dir }
 }
 
 impl Harness {
     fn status(&self) -> TaskStatus {
-        self.db.task("t1").unwrap().status
+        self.db.task(&self.id).unwrap().status
     }
 
     fn run(&self) -> TaskRun {
-        self.db.task_runs("t1").unwrap().pop().expect("a run was recorded")
+        self.db.task_runs(&self.id).unwrap().pop().expect("a run was recorded")
     }
 
     fn text(&self) -> String {
@@ -154,7 +163,7 @@ fn alive(pid: u32) -> bool {
 #[tokio::test]
 async fn agent_output_streams_and_exit_zero_asks_for_review() {
     let h = setup("review", task("printf 'rate limiter added\\n'"));
-    h.runner.start("t1").await.unwrap();
+    h.runner.start(&h.id).await.unwrap();
 
     assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(5)).await, TaskStatus::Review);
     let text = h.text();
@@ -177,7 +186,7 @@ async fn agent_output_streams_and_exit_zero_asks_for_review() {
 async fn stopping_kills_the_whole_process_group() {
     // The agent backgrounds a child, like a real one spawning a test run.
     let h = setup("stop", task("sleep 30 & echo child $!; wait"));
-    h.runner.start("t1").await.unwrap();
+    h.runner.start(&h.id).await.unwrap();
     assert_eq!(h.wait_for(TaskStatus::Working, Duration::from_secs(5)).await, TaskStatus::Working);
 
     // Wait for the child's pid to appear in the output.
@@ -211,7 +220,7 @@ async fn stopping_kills_the_whole_process_group() {
 #[tokio::test]
 async fn a_non_zero_exit_fails_the_task() {
     let h = setup("fail", task("echo 'could not apply the patch' >&2; exit 3"));
-    h.runner.start("t1").await.unwrap();
+    h.runner.start(&h.id).await.unwrap();
 
     assert_eq!(h.wait_for(TaskStatus::Failed, Duration::from_secs(5)).await, TaskStatus::Failed);
     assert_eq!(h.run().exit_code, Some(3));
@@ -223,7 +232,7 @@ async fn the_budget_stops_a_runaway_agent() {
     let mut t = task("sleep 30");
     t.budget_seconds = Some(1);
     let h = setup("budget", t);
-    h.runner.start("t1").await.unwrap();
+    h.runner.start(&h.id).await.unwrap();
 
     assert_eq!(h.wait_for(TaskStatus::Failed, Duration::from_secs(8)).await, TaskStatus::Failed);
     assert!(h.text().contains("budget of 1s reached"), "missing budget notice: {}", h.text());
@@ -236,7 +245,7 @@ async fn an_unknown_agent_is_refused_before_anything_spawns() {
     t.agent_id = "not-installed".into();
     let h = setup("unknown", t);
 
-    let err = h.runner.start("t1").await.unwrap_err();
+    let err = h.runner.start(&h.id).await.unwrap_err();
     assert!(err.contains("unknown agent"), "unhelpful error: {err}");
     assert_eq!(h.status(), TaskStatus::Backlog, "a refused start must not move the task");
 }
@@ -245,21 +254,21 @@ async fn an_unknown_agent_is_refused_before_anything_spawns() {
 /// project's own tree is left exactly as it was.
 #[tokio::test]
 async fn a_worktree_task_runs_on_its_own_branch() {
-    let mut t = task("pwd > where.txt; git rev-parse --abbrev-ref HEAD >> where.txt");
+    let mut t = task_named("wt1", "pwd > where.txt; git rev-parse --abbrev-ref HEAD >> where.txt");
     t.workspace = WorkspaceMode::Worktree;
     let h = setup("worktree", t);
     let project = PathBuf::from(h.db.project("p").unwrap().path);
     git_init(&project);
 
-    h.runner.start("t1").await.unwrap();
+    h.runner.start(&h.id).await.unwrap();
     assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(10)).await, TaskStatus::Review);
 
     // The branch is on the record, so the work is findable after a crash.
-    let branch = h.db.task("t1").unwrap().branch.expect("the branch is recorded");
+    let branch = h.db.task(&h.id).unwrap().branch.expect("the branch is recorded");
     assert!(branch.starts_with("scriptr/"), "{branch}");
 
     // The agent's own view of where it was: not the project directory.
-    let wt = scriptr_lib::worktree::path_for("t1").unwrap();
+    let wt = scriptr_lib::worktree::path_for(&h.id).unwrap();
     let saw = std::fs::read_to_string(wt.join("where.txt")).expect("the agent wrote inside the worktree");
     let mut lines = saw.lines();
     let cwd = std::fs::canonicalize(lines.next().unwrap()).unwrap();
@@ -276,18 +285,119 @@ async fn a_worktree_task_runs_on_its_own_branch() {
     assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "main");
     assert!(h.text().contains("worktree"), "the notice should name the workspace: {}", h.text());
 
-    scriptr_lib::worktree::remove(&project, "t1", true).unwrap();
+    scriptr_lib::worktree::remove(&project, &h.id, true).unwrap();
 }
 
 /// A task asking for isolation in a folder that is not a repository must say so
 /// rather than quietly running in place.
 #[tokio::test]
 async fn a_worktree_task_without_a_repository_is_refused() {
-    let mut t = task("echo nope");
+    let mut t = task_named("wt2", "echo nope");
     t.workspace = WorkspaceMode::Worktree;
     let h = setup("norepo", t);
 
-    let err = h.runner.start("t1").await.unwrap_err();
+    let err = h.runner.start(&h.id).await.unwrap_err();
     assert!(err.contains("not a git repository"), "{err}");
     assert_eq!(h.status(), TaskStatus::Backlog, "a refused start must not move the task");
+}
+
+/// B2: a successful isolated task commits what the agent left, pushes it, and
+/// lands in review. `gh` is not involved here — the PR step degrades to a
+/// notice, which is the behaviour on a machine without the GitHub CLI.
+#[tokio::test]
+async fn a_successful_worktree_task_commits_and_pushes_its_branch() {
+    let mut t = task_named("pub1", "printf 'feature\n' > feature.txt");
+    t.workspace = WorkspaceMode::Worktree;
+    let h = setup("publish", t);
+    let project = PathBuf::from(h.db.project("p").unwrap().path);
+    git_init(&project);
+    let bare = bare_remote(&project, "publish");
+
+    h.runner.start(&h.id).await.unwrap();
+    assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(20)).await, TaskStatus::Review);
+
+    // The agent never committed, so Scriptr did — and the branch is on the remote.
+    let branch = h.db.task(&h.id).unwrap().branch.expect("a branch");
+    let out = std::process::Command::new("git")
+        .args(["log", "--format=%s", &branch, "-1"])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    let subject = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert_eq!(subject, "test task", "the remote has the agent's work: {subject}");
+
+    let files = std::process::Command::new("git")
+        .args(["show", "--name-only", "--format=", &branch])
+        .current_dir(&bare)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&files.stdout).contains("feature.txt"));
+
+    let text = h.text();
+    assert!(text.contains("pushed"), "the terminal should say what happened: {text}");
+
+    scriptr_lib::worktree::remove(&project, &h.id, true).unwrap();
+    let _ = std::fs::remove_dir_all(&bare);
+}
+
+/// A publish that cannot happen must not turn a successful run into a failure:
+/// the agent's work is on a branch either way.
+#[tokio::test]
+async fn a_task_whose_push_fails_still_reaches_review() {
+    let mut t = task_named("pub2", "printf 'x\n' > x.txt");
+    t.workspace = WorkspaceMode::Worktree;
+    let h = setup("nopush", t);
+    let project = PathBuf::from(h.db.project("p").unwrap().path);
+    git_init(&project);
+    // No remote at all: the push cannot succeed.
+
+    h.runner.start(&h.id).await.unwrap();
+    assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(20)).await, TaskStatus::Review);
+
+    let text = h.text();
+    assert!(text.contains("not published"), "the reason must be visible: {text}");
+    assert!(text.contains("no remote"), "{text}");
+    assert!(h.db.task(&h.id).unwrap().pr_url.is_none());
+
+    // The work survived: committed on the branch, nothing lost.
+    let wt = scriptr_lib::worktree::path_for(&h.id).unwrap();
+    assert!(scriptr_lib::worktree::dirty(&wt).is_empty(), "it was committed");
+    assert_eq!(scriptr_lib::worktree::commits_ahead(&wt, "main"), 1);
+
+    scriptr_lib::worktree::remove(&project, &h.id, true).unwrap();
+}
+
+/// An in-place task must never be committed or pushed: its diff is mixed in
+/// with whatever the developer has open.
+#[tokio::test]
+async fn an_in_place_task_is_never_published() {
+    let h = setup("inplace", task_named("pub3", "printf 'y\n' > y.txt"));
+    let project = PathBuf::from(h.db.project("p").unwrap().path);
+    git_init(&project);
+    bare_remote(&project, "inplace");
+
+    h.runner.start(&h.id).await.unwrap();
+    assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(10)).await, TaskStatus::Review);
+
+    // The file the agent wrote is still uncommitted in the project itself.
+    assert!(!scriptr_lib::worktree::dirty(&project).is_empty(), "Scriptr committed in the user's checkout");
+    let text = h.text();
+    assert!(!text.contains("pushed"), "nothing should have been pushed: {text}");
+    assert!(h.db.task(&h.id).unwrap().branch.is_none());
+}
+
+/// A bare repository standing in for GitHub, wired up as `origin`.
+fn bare_remote(project: &PathBuf, name: &str) -> PathBuf {
+    let bare = std::env::temp_dir().join(format!("scriptr-remote-{}-{name}.git", std::process::id()));
+    let _ = std::fs::remove_dir_all(&bare);
+    std::process::Command::new("git")
+        .args(["init", "--bare", &bare.to_string_lossy()])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["remote", "add", "origin", &bare.to_string_lossy()])
+        .current_dir(project)
+        .output()
+        .unwrap();
+    bare
 }

@@ -1,4 +1,5 @@
 import { Show } from "solid-js";
+import { openUrl } from "../../lib/ipc";
 import { Icon } from "../../components/Icon";
 import { popupMenu } from "../../lib/menu";
 import { fmtCost, fmtUptime, taskTone } from "../../lib/format";
@@ -87,8 +88,19 @@ export function TaskCard(props: { task: Task }) {
         <p class="tc-fail">exit {run()!.exitCode}</p>
       </Show>
 
-      <Show when={t().labels.length > 0 || t().branch}>
+      <Show when={t().labels.length > 0 || t().branch || t().prUrl}>
         <div class="tc-chips">
+          <Show when={t().prUrl}>
+            {/* The one chip that is a destination: this is what you merge. */}
+            <button
+              class="tc-chip tc-chip-pr"
+              title={t().prUrl!}
+              onClick={(e) => (e.stopPropagation(), void openUrl(t().prUrl!))}
+            >
+              <Icon name="branch" size={10} />
+              PR #{t().prNumber ?? "?"}
+            </button>
+          </Show>
           <Show when={t().branch}>
             {/* The `scriptr/` prefix is on every one of them; the title is the news. */}
             <span class="tc-chip" title={t().branch!}>

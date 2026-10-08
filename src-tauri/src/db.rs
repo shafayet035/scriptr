@@ -94,6 +94,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     workspace       TEXT NOT NULL,
     branch          TEXT,
     base_branch     TEXT,
+    pr_url          TEXT,
+    pr_number       INTEGER,
     after           TEXT NOT NULL,
     verify          TEXT NOT NULL,
     status          TEXT NOT NULL,
@@ -205,6 +207,8 @@ impl Db {
         // columns added after a release are patched in here.
         Self::add_column(&conn, "tasks", "effort", "TEXT")?;
         Self::add_column(&conn, "tasks", "base_branch", "TEXT")?;
+        Self::add_column(&conn, "tasks", "pr_url", "TEXT")?;
+        Self::add_column(&conn, "tasks", "pr_number", "INTEGER")?;
         Ok(Self { conn: Mutex::new(conn), path })
     }
 
@@ -605,7 +609,7 @@ impl Db {
     // ---- tasks ----------------------------------------------------------
 
     const TASK_COLS: &'static str = "id, project_id, title, goal, agent_id, model, autonomy, effort, workspace, \
-         branch, base_branch, status, priority, assignee, labels, issue_url, budget_tokens, \
+         branch, base_branch, pr_url, pr_number, status, priority, assignee, labels, issue_url, budget_tokens, \
          budget_seconds, created_at, updated_at, sort_order";
 
     fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
@@ -621,18 +625,20 @@ impl Db {
             workspace: json(r, 8)?,
             branch: r.get(9)?,
             base_branch: r.get(10)?,
+            pr_url: r.get(11)?,
+            pr_number: r.get(12)?,
             after: Vec::new(),
             verify: Vec::new(),
-            status: json(r, 11)?,
-            priority: r.get(12)?,
-            assignee: r.get(13)?,
-            labels: json(r, 14)?,
-            issue_url: r.get(15)?,
-            budget_tokens: r.get(16)?,
-            budget_seconds: r.get(17)?,
-            created_at: r.get(18)?,
-            updated_at: r.get(19)?,
-            sort_order: r.get(20)?,
+            status: json(r, 13)?,
+            priority: r.get(14)?,
+            assignee: r.get(15)?,
+            labels: json(r, 16)?,
+            issue_url: r.get(17)?,
+            budget_tokens: r.get(18)?,
+            budget_seconds: r.get(19)?,
+            created_at: r.get(20)?,
+            updated_at: r.get(21)?,
+            sort_order: r.get(22)?,
         })
     }
 
@@ -674,7 +680,7 @@ impl Db {
         tx.execute(
             &format!(
                 "INSERT OR REPLACE INTO tasks ({}) VALUES \
-                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
                 Self::TASK_COLS
             ),
             params![
@@ -689,6 +695,8 @@ impl Db {
                 to_json(&t.workspace)?,
                 t.branch,
                 t.base_branch,
+                t.pr_url,
+                t.pr_number,
                 to_json(&t.status)?,
                 t.priority,
                 t.assignee,
@@ -861,6 +869,8 @@ mod tests {
             workspace: WorkspaceMode::InPlace,
             branch: Some("task/flaky".into()),
             base_branch: Some("main".into()),
+            pr_url: Some("https://github.com/x/y/pull/7".into()),
+            pr_number: Some(7),
             after: vec![],
             verify: vec!["test".into()],
             status: TaskStatus::Backlog,

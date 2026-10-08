@@ -8,7 +8,7 @@ import { TaskCard } from "./TaskCard";
 export const COLUMNS: { id: string; title: string; statuses: TaskStatus[] }[] = [
   { id: "backlog", title: "Backlog", statuses: ["backlog", "cancelled"] },
   { id: "ready", title: "Ready", statuses: ["queued"] },
-  { id: "working", title: "Working", statuses: ["working", "verifying"] },
+  { id: "working", title: "Working", statuses: ["working", "verifying", "publishing"] },
   { id: "review", title: "Review", statuses: ["review", "failed"] },
   { id: "done", title: "Done", statuses: ["done"] },
 ];

@@ -123,12 +123,21 @@ export function runBadge(run: RunInfo, now: number): { text: string; tone: strin
   }
 }
 
+/**
+ * Whether the machine still has the task: no human action applies, and the
+ * runner owns its status. One definition, because four copies drifted the
+ * first time a phase was added.
+ */
+export const isTaskBusy = (status: TaskStatus) =>
+  status === "queued" || status === "working" || status === "verifying" || status === "publishing";
+
 /** Task status reuses the status palette: working is live, review wants a human, failed is a crash. */
 export function taskTone(status: TaskStatus): "running" | "starting" | "queued" | "crashed" | "stopped" | "review" {
   switch (status) {
     case "working":
       return "running";
     case "verifying":
+    case "publishing":
       return "starting";
     case "queued":
       return "queued";
@@ -146,6 +155,7 @@ export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   queued: "Queued",
   working: "Working",
   verifying: "Verifying",
+  publishing: "Publishing",
   review: "Needs review",
   done: "Done",
   failed: "Failed",

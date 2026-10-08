@@ -94,6 +94,8 @@ export interface Settings {
   defaultShell: string;
   /** lets an outside agent start agent runs over MCP — off by default */
   mcpAgentControl: boolean;
+  /** after an isolated task succeeds, commit, push and open a PR */
+  publishOnSuccess: boolean;
 }
 
 export interface Snapshot {
@@ -179,6 +181,7 @@ export type TaskStatus =
   | "queued"
   | "working"
   | "verifying"
+  | "publishing"
   | "review"
   | "done"
   | "failed"
@@ -246,6 +249,9 @@ export interface Task {
   branch: string | null;
   /** branch the work is cut from, and later targeted by its PR */
   baseBranch: string | null;
+  /** the pull request opened for this task's branch, once there is one */
+  prUrl: string | null;
+  prNumber: number | null;
   /** later (D): task ids this task starts after — same scheduler as scripts */
   after: string[];
   /** later (C): script ids that must pass for the task to count as done */

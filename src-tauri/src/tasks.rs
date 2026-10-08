@@ -99,6 +99,8 @@ pub fn create(db: &Db, project_id: &str, input: &NewTask, origin: &str) -> Resul
         workspace: input.workspace.unwrap_or(WorkspaceMode::InPlace),
         branch: None,
         base_branch: input.base.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(str::to_string),
+        pr_url: None,
+        pr_number: None,
         after: vec![],
         verify: vec![],
         status: TaskStatus::Backlog,
@@ -384,6 +386,77 @@ impl TaskRunner {
         }
     }
 
+    /// Whether a successful run of this task would publish itself.
+    fn will_publish(&self, task: &Task) -> bool {
+        task.workspace == WorkspaceMode::Worktree
+            && self.db.settings().map(|s| s.publish_on_success).unwrap_or(true)
+    }
+
+    /// Commits, pushes and opens a PR for an isolated task that just succeeded.
+    ///
+    /// Never fails the task: the agent's work is already on a branch, so the
+    /// worst outcome is a notice explaining which step did not happen and a
+    /// `Publish` action to retry. Only ever touches a worktree task — Scriptr
+    /// does not commit in the checkout you have open.
+    pub async fn publish(&self, task: &mut Task) {
+        if !self.will_publish(task) {
+            return;
+        }
+        match self.publish_now(task).await {
+            Ok(summary) => self.terminal(&task.id).write(&notice(&summary)),
+            Err(e) => self.terminal(&task.id).write(&notice(&format!("not published: {e}"))),
+        }
+    }
+
+    /// The publish itself, without the status handling. Public so a manual
+    /// retry reports its error to the user instead of only to the terminal.
+    pub async fn publish_now(&self, task: &mut Task) -> Result<String, String> {
+        if task.workspace != WorkspaceMode::Worktree {
+            return Err("only a task with its own branch can be published".into());
+        }
+        let path = crate::worktree::path_for(&task.id)?;
+        if !path.join(".git").exists() {
+            return Err("this task has no workspace — run it first".into());
+        }
+        let branch = task
+            .branch
+            .clone()
+            .ok_or("this task has no branch yet — run it first")?;
+        let project = self.db.project(&task.project_id)?;
+        let base = match task.base_branch.clone() {
+            Some(b) => b,
+            None => crate::worktree::current_branch(&PathBuf::from(&project.path))?,
+        };
+
+        let (title, goal) = (task.title.clone(), task.goal.clone());
+        let (p, b, bs) = (path.clone(), branch.clone(), base.clone());
+        let done = tokio::task::spawn_blocking(move || {
+            crate::publish::publish(&p, &b, &bs, &title, &goal, false)
+        })
+        .await
+        .map_err(|e| format!("publishing panicked: {e}"))??;
+
+        if let Some(pr) = &done.pr {
+            task.pr_url = Some(pr.url.clone());
+            task.pr_number = Some(pr.number);
+        }
+        task.updated_at = now_ms();
+        let _ = self.db.upsert_task(task);
+        self.emit(task, None);
+
+        let mut out = String::new();
+        if done.committed.is_some() {
+            out += "committed the agent's work · ";
+        }
+        out += &format!("pushed {branch}");
+        match (&done.pr, &done.pr_note) {
+            (Some(pr), _) => out += &format!(" · {}", pr.url),
+            (None, Some(note)) => out += &format!(" · {note}"),
+            (None, None) => {}
+        }
+        Ok(out)
+    }
+
     /// Records the outcome: exit 0 wants a human (`review`), anything else failed.
     async fn finish(
         &self,
@@ -423,8 +496,19 @@ impl TaskRunner {
         } else if over_budget {
             TaskStatus::Failed
         } else if code == Some(0) {
-            self.terminal(task_id)
-                .write(&notice(&format!("agent exited 0 after {elapsed}{summary} · ready for review")));
+            let publishing = self.will_publish(&task);
+            self.terminal(task_id).write(&notice(&format!(
+                "agent exited 0 after {elapsed}{summary}{}",
+                if publishing { "" } else { " · ready for review" }
+            )));
+            // The work is done either way; publishing only decides whether the
+            // human reviews a PR or a branch. Show it while it happens: a push
+            // over a slow link is otherwise a card sitting in Working.
+            if publishing {
+                task.status = TaskStatus::Publishing;
+                self.save(&mut task, &run);
+                self.publish(&mut task).await;
+            }
             TaskStatus::Review
         } else {
             let what = code.map_or_else(|| "was killed".into(), |c| format!("exited {c}"));

@@ -154,10 +154,32 @@ whose task needs them has to install them — the composer says so, and the
 terminal repeats it on the first run. Linking or copying a configured list of
 ignored paths is the obvious follow-up.
 
-**B2 — publish.** Commit anything the agent left uncommitted, push, open the PR
-against `base_branch` with a body built from the goal and the gate results.
-Needs `gh`; degrades to "branch pushed, open it yourself" with a button when
-`gh` is missing or unauthenticated. Teaches the task its `pr_url` and `pr_number`.
+**B2 — publish. Built.** On a successful run of an isolated task: commit
+anything the agent left uncommitted, push the branch, open a PR against
+`base_branch` with a body built from the goal, the commit subjects and the
+diffstat. The task learns its `pr_url` and `pr_number`, and the card grows a
+chip that opens it.
+
+Three rules this slice settled:
+
+**Only a worktree task is ever published.** An in-place task's diff is mixed in
+with whatever the developer has open, so committing it would commit their work
+too. Scriptr never commits in the checkout you have open — the setting does not
+even apply there.
+
+**A publish failure is not a task failure.** The agent's work is already
+committed on a branch. A missing remote, a rejected push or an unauthenticated
+`gh` leaves the task in review with a notice naming the step that did not
+happen, and a *Publish* action to retry. Partial progress is reported
+truthfully: "pushed, but gh could not open a PR" is a real outcome.
+
+**Publishing twice reuses the PR.** `gh pr view` is consulted before
+`gh pr create`, so a retry after a fix updates the existing PR rather than
+failing on a duplicate — and a closed or merged PR is not reused.
+
+PRs open as ready rather than draft, because until C3 lands there is no
+reviewer to flip a draft to ready, and a permanently-draft PR is just friction.
+That flips when the reviewer arrives.
 
 **C1 — verify.** `verifying` finally gets a writer: run `task.verify` through
 the existing scheduler and gates, pass/fail into the task. This is the slice

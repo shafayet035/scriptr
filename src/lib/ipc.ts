@@ -74,6 +74,8 @@ export interface Backend {
   /** a task's isolated checkout, or null when it has none (B1) */
   taskWorkspace(taskId: string): Promise<WorkspaceInfo | null>;
   taskWorkspaceDiscard(taskId: string, force: boolean): Promise<void>;
+  /** commit, push and open the PR by hand; resolves with what it did */
+  taskPublish(taskId: string): Promise<string>;
   taskAttach(taskId: string, onData: (bytes: Uint8Array) => void): Promise<void>;
   taskWrite(taskId: string, data: string): Promise<void>;
   taskResize(taskId: string, cols: number, rows: number): Promise<void>;
@@ -129,6 +131,7 @@ const tauriBackend: Backend = {
   projectBranches: (projectId) => invoke("project_branches", { projectId }),
   taskWorkspace: (taskId) => invoke("task_workspace", { taskId }),
   taskWorkspaceDiscard: (taskId, force) => invoke("task_workspace_discard", { taskId, force }),
+  taskPublish: (taskId) => invoke("task_publish", { taskId }),
   taskAttach: (taskId, onData) => {
     const onDataChannel = new Channel<unknown>();
     onDataChannel.onmessage = (msg) => onData(toBytes(msg));
@@ -175,6 +178,12 @@ export async function pickSavePath(defaultPath: string): Promise<string | null> 
 export async function confirmAction(message: string, confirmLabel: string, title = "Scriptr"): Promise<boolean> {
   const { confirm } = await import("@tauri-apps/plugin-dialog");
   return confirm(message, { title, kind: "warning", okLabel: confirmLabel, cancelLabel: "Cancel" });
+}
+
+/** Opens a url in the user's own browser, not in the app's webview. */
+export async function openUrl(url: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
 }
 
 export async function revealInFinder(path: string): Promise<void> {

@@ -12,6 +12,7 @@ import {
   fmtUptime,
   gateDescription,
   isLive,
+  isTaskBusy,
   runBadge,
   taskTone,
   tildify,
@@ -546,7 +547,7 @@ function ViewSwitcher() {
   const counts = () => {
     const list = tasksOf(pid());
     return {
-      working: list.filter((t) => t.status === "working" || t.status === "queued" || t.status === "verifying").length,
+      working: list.filter((t) => isTaskBusy(t.status)).length,
       review: list.filter((t) => t.status === "review").length,
       failed: list.filter((t) => t.status === "failed").length,
     };

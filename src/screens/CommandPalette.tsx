@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { Icon, type IconName } from "../components/Icon";
 import { computePlan } from "../lib/graph";
-import { isLive, tildify, TASK_STATUS_LABEL } from "../lib/format";
+import { isLive, isTaskBusy, tildify, TASK_STATUS_LABEL } from "../lib/format";
 import { isMac } from "../lib/ipc";
 import {
   agent,
@@ -128,7 +128,7 @@ export function CommandPalette() {
       for (const t of state.tasks) {
         const m = fuzzy(q, t.title);
         if (!m) continue;
-        const working = t.status === "working" || t.status === "queued" || t.status === "verifying";
+        const working = isTaskBusy(t.status);
         const meta = `${TASK_STATUS_LABEL[t.status]} · ${agent(t.agentId)?.name ?? t.agentId}`;
         const base = m.score + (t.projectId === current ? 2 : 0);
         if (working && verb !== "edit") {

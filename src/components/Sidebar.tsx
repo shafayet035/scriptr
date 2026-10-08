@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { Icon } from "./Icon";
 import { popupMenu } from "../lib/menu";
-import { displayName, isLive, tone } from "../lib/format";
+import { displayName, isLive, isTaskBusy, tone } from "../lib/format";
 import type { Group, Project, Script } from "../lib/types";
 import {
   activeScriptId,
@@ -353,7 +353,7 @@ function taskCounts(projectId: string) {
   const list = tasksOf(projectId);
   return {
     total: list.length,
-    working: list.filter((t) => t.status === "working" || t.status === "queued" || t.status === "verifying").length,
+    working: list.filter((t) => isTaskBusy(t.status)).length,
     review: list.filter((t) => t.status === "review").length,
   };
 }
