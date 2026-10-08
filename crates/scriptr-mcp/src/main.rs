@@ -136,7 +136,7 @@ fn tools() -> Value {
         {
             "name": "list_tasks",
             "title": "List Scriptr tasks",
-            "description": "Tasks and their status (backlog, working, review, done, failed), optionally for one project.",
+            "description": "The board: every card and the column it is in (backlog, todo, doing, review, done), optionally for one project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"project": {"type": "string", "description": "Optional project name, path or id"}}
@@ -146,7 +146,7 @@ fn tools() -> Value {
         {
             "name": "scriptr_status",
             "title": "Scriptr status",
-            "description": "Whether Scriptr is running, how many projects it manages, how many scripts are up and how many agents are working.",
+            "description": "Whether Scriptr is running, how many projects it manages, how many scripts are up and how many cards are in progress.",
             "inputSchema": {"type": "object", "additionalProperties": false},
             "annotations": {"readOnlyHint": true}
         },
@@ -305,19 +305,26 @@ fn call_tool(name: &str, args: &Value) -> Value {
                         .as_array()
                         .map(|a| {
                             a.iter()
+                                // The id is needed to act on a card, so it belongs
+                                // in the listing rather than a second round trip.
                                 .map(|t| {
+                                    let labels: Vec<&str> = t["labels"]
+                                        .as_array()
+                                        .map(|l| l.iter().filter_map(Value::as_str).collect())
+                                        .unwrap_or_default();
                                     format!(
-                                        "- [{}] {} ({})",
+                                        "- [{}] {}  ({}){}",
                                         t["status"].as_str().unwrap_or("?"),
                                         t["title"].as_str().unwrap_or("?"),
-                                        t["agentId"].as_str().unwrap_or("?")
+                                        t["id"].as_str().unwrap_or("?"),
+                                        if labels.is_empty() { String::new() } else { format!(" · {}", labels.join(", ")) }
                                     )
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n")
                         })
                         .unwrap_or_default();
-                    text_result(if list.is_empty() { "No tasks.".into() } else { list }, false)
+                    text_result(if list.is_empty() { "No cards on this board.".into() } else { list }, false)
                 }
                 Call::Offline(why) | Call::Failed(why) => text_result(why, true),
             }

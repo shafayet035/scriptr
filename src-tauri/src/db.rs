@@ -132,6 +132,24 @@ const LINKS: [Link; 3] = [
     Link { table: "task_deps", left: "task_id", right: "depends_on", right_table: "tasks", legacy: ("tasks", "after") },
 ];
 
+/// `INSERT OR REPLACE` is a DELETE followed by an INSERT, so with
+/// `foreign_keys = ON` it fires every `ON DELETE CASCADE` pointing at the row —
+/// silently dropping a script out of its groups, or un-blocking the cards that
+/// waited on a card, just because something was renamed. Upserts therefore use
+/// `ON CONFLICT DO UPDATE`, which keeps the row and leaves the edges alone.
+///
+/// `UPSERT_SUFFIX` builds the `DO UPDATE SET col = excluded.col, …` tail from a
+/// column list, so the two never drift apart.
+fn on_conflict_update(cols: &str) -> String {
+    let sets: Vec<String> = cols
+        .split(',')
+        .map(str::trim)
+        .filter(|c| !c.is_empty() && *c != "id")
+        .map(|c| format!("{c} = excluded.{c}"))
+        .collect();
+    format!(" ON CONFLICT(id) DO UPDATE SET {}", sets.join(", "))
+}
+
 pub struct Db {
     conn: Mutex<Connection>,
     path: PathBuf,
@@ -436,8 +454,9 @@ DROP TABLE IF EXISTS task_verify;
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(err)?;
         let sql = format!(
-            "INSERT OR REPLACE INTO scripts ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-            Self::SCRIPT_COLS
+            "INSERT INTO scripts ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14){}",
+            Self::SCRIPT_COLS,
+            on_conflict_update(Self::SCRIPT_COLS)
         );
         for s in scripts {
             tx.execute(
@@ -517,7 +536,8 @@ DROP TABLE IF EXISTS task_verify;
         let mut conn = self.conn();
         let tx = conn.transaction().map_err(err)?;
         tx.execute(
-            "INSERT OR REPLACE INTO groups (id, project_id, name) VALUES (?1, ?2, ?3)",
+            "INSERT INTO groups (id, project_id, name) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(id) DO UPDATE SET project_id = excluded.project_id, name = excluded.name",
             params![g.id, g.project_id, g.name],
         )
         .map_err(err)?;
@@ -667,8 +687,9 @@ DROP TABLE IF EXISTS task_verify;
         let tx = conn.transaction().map_err(err)?;
         tx.execute(
             &format!(
-                "INSERT OR REPLACE INTO tasks ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                Self::TASK_COLS
+                "INSERT INTO tasks ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12){}",
+                Self::TASK_COLS,
+                on_conflict_update(Self::TASK_COLS)
             ),
             params![
                 t.id,
@@ -902,6 +923,53 @@ mod tests {
         let mut ghost = sample_task("t3");
         ghost.after = vec!["nope".into()];
         assert!(db.upsert_task(&ghost).is_err());
+    }
+
+    /// Saving a row must not disturb the edges that point *at* it.
+    ///
+    /// `INSERT OR REPLACE` is a delete-then-insert, so every `ON DELETE
+    /// CASCADE` fires: renaming a script used to drop it out of its groups and
+    /// out of other scripts' dependency lists, and renaming a card used to
+    /// un-block whatever waited on it. Silently, and only on the next read.
+    #[test]
+    fn saving_a_row_keeps_the_edges_pointing_at_it() {
+        let db = seeded();
+        db.upsert_script(&sample_script("db", "p", "db")).unwrap();
+        let mut api = sample_script("api", "p", "api");
+        api.after = vec!["db".into()];
+        db.upsert_script(&api).unwrap();
+        db.upsert_group(&Group {
+            id: "g".into(),
+            project_id: "p".into(),
+            name: "Full stack".into(),
+            script_ids: vec!["db".into(), "api".into()],
+        })
+        .unwrap();
+
+        // Rename the dependency everything else points at.
+        let mut renamed = sample_script("db", "p", "database");
+        renamed.label = Some("Postgres".into());
+        db.upsert_script(&renamed).unwrap();
+
+        assert_eq!(db.script("db").unwrap().name, "database", "the edit landed");
+        assert_eq!(db.script("api").unwrap().after, vec!["db".to_string()], "api still waits on db");
+        assert_eq!(
+            db.groups().unwrap()[0].script_ids,
+            vec!["db".to_string(), "api".to_string()],
+            "db is still in the group, in order"
+        );
+
+        // Same for cards: renaming a blocker must not un-block anything.
+        db.upsert_task(&sample_task("first")).unwrap();
+        let mut second = sample_task("second");
+        second.after = vec!["first".into()];
+        db.upsert_task(&second).unwrap();
+
+        let mut retitled = sample_task("first");
+        retitled.title = "First, renamed".into();
+        db.upsert_task(&retitled).unwrap();
+        assert_eq!(db.task("second").unwrap().after, vec!["first".to_string()], "second is still blocked");
+        assert_eq!(db.task("first").unwrap().title, "First, renamed");
     }
 
     /// The agent era's tasks become cards, and the columns it needed are gone.
