@@ -106,6 +106,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 - Signed releases and auto-update
 - Combined, time-interleaved log view across a group
 
+## Driving it from an AI agent
+
+Scriptr is an MCP server. Claude Code can list what a project runs, bring the
+stack up in dependency order, read the logs of whatever broke, and file work
+onto the board — see [docs/MCP.md](docs/MCP.md). Starting an agent run from
+outside is off by default.
+
 ## License
 
 [MIT](LICENSE)

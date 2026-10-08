@@ -92,6 +92,8 @@ export interface Settings {
   keepTomlInSync: boolean;
   importMode: "merge" | "replace" | "preview";
   defaultShell: string;
+  /** lets an outside agent start agent runs over MCP — off by default */
+  mcpAgentControl: boolean;
 }
 
 export interface Snapshot {

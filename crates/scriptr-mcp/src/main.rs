@@ -53,17 +53,31 @@ fn request(method: &str, path: &str, body: Option<Value>) -> Call {
     };
     let url = format!("http://127.0.0.1:{}{path}", info.port);
     let auth = format!("Bearer {}", info.token);
+    // A refusal's body is the only actionable part of it — "no script \"api\",
+    // known: web, worker", or that the user has not allowed agent runs to be
+    // started from outside — so take 4xx/5xx as a response to read, not an Err.
+    let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
     let sent = match (method, body) {
-        ("POST", Some(b)) => ureq::post(&url).header("authorization", &auth).send_json(b),
-        _ => ureq::get(&url).header("authorization", &auth).call(),
+        ("POST", Some(b)) => agent.post(&url).header("authorization", &auth).send_json(b),
+        ("PATCH", Some(b)) => agent.patch(&url).header("authorization", &auth).send_json(b),
+        _ => agent.get(&url).header("authorization", &auth).call(),
     };
     match sent {
-        Ok(mut res) => match res.body_mut().read_json::<Value>() {
-            Ok(v) => Call::Ok(v),
-            Err(e) => Call::Failed(format!("unreadable reply from Scriptr: {e}")),
-        },
-        Err(ureq::Error::StatusCode(code)) => {
-            Call::Failed(format!("Scriptr refused the request ({code})"))
+        Ok(mut res) => {
+            let status = res.status();
+            let body = res.body_mut().read_to_string().unwrap_or_default();
+            if status.is_success() {
+                return match serde_json::from_str::<Value>(&body) {
+                    Ok(v) => Call::Ok(v),
+                    Err(e) => Call::Failed(format!("unreadable reply from Scriptr: {e}")),
+                };
+            }
+            let why = body.trim();
+            Call::Failed(if why.is_empty() {
+                format!("Scriptr refused the request ({})", status.as_u16())
+            } else {
+                why.to_string()
+            })
         }
         Err(e) => Call::Offline(format!("Scriptr is not reachable on port {} ({e})", info.port)),
     }
@@ -139,6 +153,112 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
             "title": "Scriptr status",
             "description": "Whether Scriptr is running, how many projects it manages, how many scripts are up and how many agents are working.",
             "inputSchema": {"type": "object", "additionalProperties": false},
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "get_task",
+            "title": "Read one Scriptr task",
+            "description": "Everything about one task: its goal, status, branch, agent, every run with exit code, token cost and duration, and where its worktree is. Use it to find out how a task went before deciding what to do next.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"taskId": {"type": "string", "description": "Task id, as list_tasks reports it"}},
+                "required": ["taskId"]
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "update_task",
+            "title": "Update a Scriptr task",
+            "description": "Change a filed task: move it between board columns, re-prioritise it, raise its effort, retarget its base branch, rewrite its goal, or add labels. Only the fields you pass are touched. A running task's status cannot be changed — stop it first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string"},
+                    "status": {"type": "string", "enum": ["backlog", "queued", "working", "verifying", "review", "done", "failed", "cancelled"], "description": "Board column. Use 'queued' to mark it ready, 'done' when it is finished."},
+                    "title": {"type": "string"},
+                    "goal": {"type": "string", "description": "Rewrites the prompt the agent will receive."},
+                    "priority": {"type": "integer", "minimum": 0, "maximum": 3},
+                    "effort": {"type": "string", "enum": ["low", "medium", "high", "extra", "max", "ultracode"]},
+                    "base": {"type": "string", "description": "Branch the work targets, e.g. main or staging."},
+                    "workspace": {"type": "string", "enum": ["in-place", "worktree"]},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "issueUrl": {"type": "string"}
+                },
+                "required": ["taskId"]
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
+        },
+        {
+            "name": "start_task",
+            "title": "Start a Scriptr agent run",
+            "description": "Runs a task's coding agent now. This spends tokens and edits the developer's code, so it is refused unless they have turned on 'Let agents start runs' in Scriptr's settings. Prefer file_task and let them press Run.",
+            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true}
+        },
+        {
+            "name": "stop_task",
+            "title": "Stop a Scriptr agent run",
+            "description": "Stops a task's running agent, signalling its whole process group. The task is recorded as cancelled.",
+            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
+        },
+        {
+            "name": "list_scripts",
+            "title": "List Scriptr scripts",
+            "description": "The processes a project runs — server, worker, database, migrations — with whether each is up, its pid, port, uptime and readiness. Use it to find out what is running before starting or stopping anything.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"project": {"type": "string", "description": "Optional project name, path or id"}}
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "control_script",
+            "title": "Start, stop or restart a script",
+            "description": "Starts, stops or restarts one of the project's processes. These are commands the developer configured themselves. Starting respects the script's readiness gate, so it returns once the process is up, not merely spawned.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "script": {"type": "string", "description": "Script name or id, as list_scripts reports it"},
+                    "action": {"type": "string", "enum": ["start", "stop", "restart"]}
+                },
+                "required": ["script", "action"]
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
+        },
+        {
+            "name": "run_group",
+            "title": "Run a Scriptr group",
+            "description": "Starts a named group of scripts in dependency order, waiting for each wave's readiness gates before the next. This is how you bring a whole stack up in one call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"group": {"type": "string", "description": "Group name or id"}},
+                "required": ["group"]
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
+        },
+        {
+            "name": "get_logs",
+            "title": "Read script or agent output",
+            "description": "Recent terminal output for a running or finished script, or for a task's agent, with ANSI escapes stripped. This is how you find out WHY something failed — read the logs before guessing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "'script:<name-or-id>' or 'task:<id>'"},
+                    "lines": {"type": "integer", "minimum": 1, "maximum": 2000, "description": "How many trailing lines, default 200"}
+                },
+                "required": ["target"]
+            },
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": "list_groups",
+            "title": "List Scriptr groups",
+            "description": "Named groups of scripts a project can bring up together, with how many scripts each holds.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"project": {"type": "string"}}
+            },
             "annotations": {"readOnlyHint": true}
         }
     ])
@@ -231,8 +351,215 @@ fn call_tool(name: &str, args: &Value) -> Value {
                 Call::Failed(e) => text_result(e, true),
             }
         }
+        "get_task" => {
+            let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
+            match request("GET", &format!("/v1/tasks/{}", urlencode(&id)), None) {
+                Call::Ok(v) => text_result(describe_task(&v), false),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "update_task" => {
+            let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
+            let mut patch = args.clone();
+            if let Some(obj) = patch.as_object_mut() {
+                obj.remove("taskId");
+            }
+            if patch.as_object().is_some_and(serde_json::Map::is_empty) {
+                return text_result("nothing to change — pass at least one field besides taskId".into(), true);
+            }
+            match request("PATCH", &format!("/v1/tasks/{}", urlencode(&id)), Some(patch)) {
+                Call::Ok(v) => text_result(
+                    format!(
+                        "Updated \"{}\" — now [{}], priority {}.",
+                        v["title"].as_str().unwrap_or("task"),
+                        v["status"].as_str().unwrap_or("?"),
+                        v["priority"]
+                    ),
+                    false,
+                ),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "start_task" | "stop_task" => {
+            let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
+            let verb = if name == "start_task" { "start" } else { "stop" };
+            match request("POST", &format!("/v1/tasks/{}/{verb}", urlencode(&id)), Some(json!({}))) {
+                Call::Ok(v) => text_result(
+                    format!(
+                        "{} \"{}\" — now [{}].",
+                        if verb == "start" { "Started" } else { "Stopped" },
+                        v["title"].as_str().unwrap_or("task"),
+                        v["status"].as_str().unwrap_or("?")
+                    ),
+                    false,
+                ),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "list_scripts" => {
+            let path = match args.get("project").and_then(Value::as_str) {
+                Some(p) => format!("/v1/scripts?project={}", urlencode(p)),
+                None => "/v1/scripts".to_string(),
+            };
+            match request("GET", &path, None) {
+                Call::Ok(v) => {
+                    let list = v
+                        .as_array()
+                        .map(|a| a.iter().map(describe_script).collect::<Vec<_>>().join("\n"))
+                        .unwrap_or_default();
+                    text_result(if list.is_empty() { "No scripts.".into() } else { list }, false)
+                }
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "control_script" => {
+            let Some(script) = req_str(args, "script") else { return missing("script") };
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("");
+            if !["start", "stop", "restart"].contains(&action) {
+                return text_result("`action` must be start, stop or restart".into(), true);
+            }
+            let path = format!("/v1/scripts/{}/{action}", urlencode(&script));
+            match request("POST", &path, Some(json!({}))) {
+                Call::Ok(v) => text_result(
+                    format!("{script}: {} ({})", action_past(action), v["state"].as_str().unwrap_or("?")),
+                    false,
+                ),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "run_group" => {
+            let Some(group) = req_str(args, "group") else { return missing("group") };
+            match request("POST", &format!("/v1/groups/{}/run", urlencode(&group)), Some(json!({}))) {
+                Call::Ok(v) => text_result(
+                    format!(
+                        "Running group \"{}\" — {} scripts, in dependency order.",
+                        v["group"].as_str().unwrap_or(&group),
+                        v["scripts"]
+                    ),
+                    false,
+                ),
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "list_groups" => {
+            let path = match args.get("project").and_then(Value::as_str) {
+                Some(p) => format!("/v1/groups?project={}", urlencode(p)),
+                None => "/v1/groups".to_string(),
+            };
+            match request("GET", &path, None) {
+                Call::Ok(v) => {
+                    let list = v
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(|g| {
+                                    format!(
+                                        "- {} ({} scripts)",
+                                        g["name"].as_str().unwrap_or("?"),
+                                        g["scriptIds"].as_array().map(Vec::len).unwrap_or(0)
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_default();
+                    text_result(if list.is_empty() { "No groups.".into() } else { list }, false)
+                }
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
+        "get_logs" => {
+            let Some(target) = req_str(args, "target") else { return missing("target") };
+            let lines = args.get("lines").and_then(Value::as_u64).unwrap_or(200);
+            let path = format!("/v1/logs?target={}&lines={lines}", urlencode(&target));
+            match request("GET", &path, None) {
+                Call::Ok(v) => {
+                    let text = v["text"].as_str().unwrap_or("");
+                    text_result(
+                        if text.trim().is_empty() {
+                            format!("No output recorded for {target} — it may not have run yet.")
+                        } else {
+                            format!("{target}, last {} lines:\n\n{text}", v["lines"])
+                        },
+                        false,
+                    )
+                }
+                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
+            }
+        }
         other => text_result(format!("unknown tool: {other}"), true),
     }
+}
+
+fn req_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+fn missing(key: &str) -> Value {
+    text_result(format!("`{key}` is required and must not be empty"), true)
+}
+
+fn action_past(action: &str) -> &'static str {
+    match action {
+        "start" => "started",
+        "stop" => "stopped",
+        _ => "restarted",
+    }
+}
+
+/// One script as a line a model can act on: state first, then why it matters.
+fn describe_script(s: &Value) -> String {
+    let state = s["state"].as_str().unwrap_or("?");
+    let mut line = format!("- {} [{state}]", s["name"].as_str().unwrap_or("?"));
+    if let Some(pid) = s["pid"].as_u64() {
+        line += &format!(" pid {pid}");
+    }
+    if let Some(port) = s["port"].as_u64() {
+        line += &format!(" port {port}");
+    }
+    if let Some(cmd) = s["cmd"].as_str() {
+        line += &format!(" · {cmd}");
+    }
+    line
+}
+
+/// A task plus its run history, since "how did it go" is the usual question.
+fn describe_task(v: &Value) -> String {
+    let mut out = format!(
+        "{}\n  status: {}\n  goal: {}\n  agent: {}",
+        v["title"].as_str().unwrap_or("?"),
+        v["status"].as_str().unwrap_or("?"),
+        v["goal"].as_str().unwrap_or("?"),
+        v["agentId"].as_str().unwrap_or("?"),
+    );
+    for (label, key) in [("effort", "effort"), ("branch", "branch"), ("base", "baseBranch")] {
+        if let Some(x) = v[key].as_str() {
+            out += &format!("\n  {label}: {x}");
+        }
+    }
+    if let Some(path) = v["workspacePath"].as_str() {
+        out += &format!("\n  workspace: {path}");
+    }
+    let runs = v["runs"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if runs.is_empty() {
+        out += "\n  never run";
+        return out;
+    }
+    out += &format!("\n  {} run(s):", runs.len());
+    for r in runs {
+        out += &format!("\n    - {}", r["state"].as_str().unwrap_or("?"));
+        if let Some(code) = r["exitCode"].as_i64() {
+            out += &format!(", exit {code}");
+        }
+        if let Some(turns) = r["turns"].as_u64() {
+            out += &format!(", {turns} turns");
+        }
+        if let Some(cost) = r["costUsd"].as_f64() {
+            out += &format!(", ${cost:.2}");
+        }
+    }
+    out += "\n  (use get_logs with target \"task:<id>\" for the agent's output)";
+    out
 }
 
 fn urlencode(s: &str) -> String {

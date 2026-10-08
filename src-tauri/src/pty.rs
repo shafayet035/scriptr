@@ -146,6 +146,12 @@ impl Terminal {
         inner.sink = alive.then_some(sink);
     }
 
+    /// The ring buffer as it stands, without attaching. For log readers that
+    /// want history and not a live feed.
+    pub fn snapshot(&self) -> Vec<u8> {
+        lock(&self.inner).ring.snapshot()
+    }
+
     pub fn size(&self) -> (u16, u16) {
         *lock(&self.size)
     }

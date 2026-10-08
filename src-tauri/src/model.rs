@@ -189,6 +189,12 @@ pub struct Settings {
     pub keep_toml_in_sync: bool,
     pub import_mode: ImportMode,
     pub default_shell: String,
+    /// Lets an outside agent *start* agent runs over MCP. Off by default: a
+    /// started run spends tokens and edits code, and the point of filing to a
+    /// board is that a human sees it first. Reading, filing and script control
+    /// never need it.
+    #[serde(default)]
+    pub mcp_agent_control: bool,
 }
 
 impl Default for Settings {
@@ -198,6 +204,7 @@ impl Default for Settings {
             keep_toml_in_sync: false,
             import_mode: ImportMode::Merge,
             default_shell: default_shell(),
+            mcp_agent_control: false,
         }
     }
 }

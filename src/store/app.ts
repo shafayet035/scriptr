@@ -99,7 +99,7 @@ export const [state, setState] = createStore<AppState>({
   projects: [],
   scripts: [],
   groups: [],
-  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc" },
+  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false },
   dbPath: "",
   runs: {},
   agents: [],

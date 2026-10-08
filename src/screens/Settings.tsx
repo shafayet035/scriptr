@@ -230,6 +230,7 @@ function ImportExport() {
 /** How an outside coding agent files tasks into Scriptr. */
 function Integrations() {
   const [info] = createResource(() => backend.mcpInfo().catch(() => null));
+  const set = (patch: Partial<Settings>) => void saveSettings({ ...state.settings, ...patch });
   const copy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -277,13 +278,28 @@ function Integrations() {
 
       <Card
         title="What an outside agent may do"
-        body="Reading is free; writing is not. These limits are deliberate — a goal written by another agent becomes a prompt for yours."
+        body="Reading and running your own scripts is allowed. Spending tokens is not — that line is where the default sits."
       >
         <div class="col" style={{ gap: "4px" }}>
-          <p class="t-body-12 c-secondary">· File a task — lands in Backlog, ask-first autonomy, labelled with its origin</p>
-          <p class="t-body-12 c-secondary">· List projects, list tasks, read status</p>
-          <p class="t-body-12 c-muted">· It cannot start agents, run scripts, or read your logs</p>
+          <p class="t-body-12 c-secondary">· Read projects, scripts, groups, tasks, run history and terminal output</p>
+          <p class="t-body-12 c-secondary">· Start, stop and restart your scripts; bring a group up in order</p>
+          <p class="t-body-12 c-secondary">· File a task — it lands in Backlog, ask-first, labelled with its origin</p>
+          <p class="t-body-12 c-secondary">· Move, re-prioritise and retarget tasks it has filed</p>
+          <p class="t-body-12 c-muted">· It cannot delete anything, edit your scripts, or change these settings</p>
         </div>
+        <button
+          class="settings-row toggle-row"
+          onClick={() => set({ mcpAgentControl: !state.settings.mcpAgentControl })}
+        >
+          <span class="toggle" role="switch" aria-checked={state.settings.mcpAgentControl} />
+          <span class="col" style={{ gap: "2px", "text-align": "left" }}>
+            <span class="t-medium-12 c-primary">Let agents start runs</span>
+            <span class="t-caption-11 c-muted">
+              Off by default. A started run spends tokens and edits your code, and the point of a board is that you see
+              the work before it happens.
+            </span>
+          </span>
+        </button>
       </Card>
     </>
   );

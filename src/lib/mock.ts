@@ -86,7 +86,7 @@ export function createMockBackend(): Backend {
     { id: "g2", projectId: "p1", name: "Backend only", scriptIds: ["api", "worker"] },
   ];
 
-  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc" };
+  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false };
 
   // ---- AI agents & tasks (docs/AI-PM.md slice A) ----
   const agent = (
