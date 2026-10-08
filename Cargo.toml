@@ -2,3 +2,11 @@
 [workspace]
 resolver = "2"
 members = ["src-tauri", "crates/scriptr-mcp"]
+
+# Profiles only take effect at the workspace root; Cargo ignores a member's own.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
