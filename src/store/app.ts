@@ -1,13 +1,10 @@
 import { createEffect, createRoot, createSignal } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { computePlan } from "../lib/graph";
-import { backend, confirmAction, initBackend, pickFolder, pickSavePath, pickTomlFile } from "../lib/ipc";
+import { backend, initBackend, pickFolder, pickSavePath, pickTomlFile } from "../lib/ipc";
 import { isLive } from "../lib/format";
-import { isTaskKey, taskIdOf, taskKey } from "../lib/terminals";
 import type {
   AddProjectInput,
-  AgentAdapter,
-  Autonomy,
   Group,
   GroupProgress,
   Plan,
@@ -18,7 +15,6 @@ import type {
   Script,
   Settings,
   Task,
-  TaskRun,
 } from "../lib/types";
 
 export type View = "board" | "terminals" | "deps" | "log";
@@ -55,19 +51,8 @@ interface Ui {
   /** card the board keyboard acts on */
   boardSelection: string | null;
   /** where each task's terminal lives */
-  termHome: Record<string, "deck" | "tab">;
-  /** task shown in the agent deck */
-  deckTaskId: string | null;
-  /** rail (just a status strip) · open · max (deck owns the view) */
-  deckState: "rail" | "open" | "max";
-  /** remembered height of the open deck */
-  deckHeight: number;
 }
 
-/** The deck is a 36px status rail until an agent is live or you pick a card. */
-export const DECK_RAIL = 36;
-export const DECK_DEFAULT = 320;
-export const DECK_MIN = 140;
 
 export const SIDEBAR_DEFAULT = 256;
 export const SIDEBAR_MIN = 200;
@@ -81,10 +66,8 @@ interface AppState {
   settings: Settings;
   dbPath: string;
   runs: Record<string, RunInfo>;
-  agents: AgentAdapter[];
   tasks: Task[];
   /** latest run per task */
-  taskRuns: Record<string, TaskRun | null>;
   stats: Record<string, ProcStats>;
   progress: Record<string, GroupProgress>;
   /** last observed starting → ready duration per script, for the cold-start estimate */
@@ -99,12 +82,10 @@ export const [state, setState] = createStore<AppState>({
   projects: [],
   scripts: [],
   groups: [],
-  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false, publishOnSuccess: true },
+  settings: { onQuit: "stop", keepTomlInSync: false, importMode: "merge", defaultShell: "/bin/zsh -lc" },
   dbPath: "",
   runs: {},
-  agents: [],
   tasks: [],
-  taskRuns: {},
   stats: {},
   progress: {},
   readyMs: {},
@@ -126,10 +107,6 @@ export const [state, setState] = createStore<AppState>({
     sidebarWidth: SIDEBAR_DEFAULT,
     composerTaskId: null,
     boardSelection: null,
-    termHome: {},
-    deckTaskId: null,
-    deckState: "rail",
-    deckHeight: DECK_DEFAULT,
   },
 });
 
@@ -203,8 +180,6 @@ export const tabsOf = (projectId: string) => state.ui.tabsByProject[projectId] ?
 export const task = (id: string | null) => state.tasks.find((t) => t.id === id);
 export const tasksOf = (projectId: string) =>
   state.tasks.filter((t) => t.projectId === projectId).sort((a, b) => b.priority - a.priority || a.sortOrder - b.sortOrder);
-export const taskRunOf = (taskId: string) => state.taskRuns[taskId] ?? null;
-export const agent = (id: string | null) => state.agents.find((a) => a.id === id);
 export const activeScriptId = () => {
   const pid = state.ui.projectId;
   return pid ? (state.ui.activeByProject[pid] ?? null) : null;
@@ -238,9 +213,9 @@ function onRunInfo(r: RunInfo) {
   if (isLive(r.state) && (!prevState || !isLive(prevState))) ensureTab(r.scriptId, false);
 }
 
-/** A tab key is a script id, or `task:<id>` for an agent run. */
+/** A tab key is a script id. */
 export function projectOfTab(key: string): string | undefined {
-  return isTaskKey(key) ? task(taskIdOf(key))?.projectId : script(key)?.projectId;
+  return script(key)?.projectId;
 }
 
 function ensureTab(key: string, focus: boolean) {
@@ -332,47 +307,22 @@ export async function init() {
     }
   });
   void backend.on("project:changed", () => void refresh());
-  void backend.on("task:state", ({ task, run }) => {
+  void backend.on("task:state", ({ task }) => {
     setState("tasks", (list) => {
       const i = list.findIndex((t) => t.id === task.id);
       return i >= 0 ? list.map((t) => (t.id === task.id ? task : t)) : [...list, task];
     });
-    setState("taskRuns", task.id, run);
-    // A starting agent claims the deck rather than stealing a tab, unless the
-    // user pinned it into Terminals.
-    if (task.status === "working" || task.status === "queued") {
-      if (state.ui.termHome[taskKey(task.id)] === "tab") ensureTab(taskKey(task.id), false);
-      else setState("ui", produce((ui) => {
-        ui.termHome[taskKey(task.id)] = "deck";
-        if (!ui.deckTaskId) ui.deckTaskId = task.id;
-      }));
-    }
   });
   void backend.on("menu", onMenu);
 
-  // Agents and tasks load after the first paint; neither blocks the workspace.
-  void loadAgents();
+  // Cards load after the first paint; they do not block the workspace.
   void Promise.all(snap.projects.map((p) => loadTasks(p.id)));
-}
-
-export async function loadAgents() {
-  try {
-    setState("agents", await backend.agentList());
-  } catch (e) {
-    toast(errText(e), "error");
-  }
 }
 
 export async function loadTasks(projectId: string) {
   try {
     const list = await backend.taskList(projectId);
     setState("tasks", (prev) => [...prev.filter((t) => t.projectId !== projectId), ...list]);
-    await Promise.all(
-      list.map(async (t) => {
-        const runs = await backend.taskRuns(t.id);
-        setState("taskRuns", t.id, runs.at(-1) ?? null);
-      }),
-    );
   } catch (e) {
     toast(errText(e), "error");
   }
@@ -448,33 +398,6 @@ export function terminalFocus(scriptId: string) {
 export const setView = (view: View) => setState("ui", { view, settingsOpen: false });
 export const selectCard = (taskId: string | null) => setState("ui", "boardSelection", taskId);
 
-/** Height the deck should occupy right now. */
-export const deckHeight = () =>
-  state.ui.deckState === "rail" ? DECK_RAIL : state.ui.deckState === "max" ? 10_000 : state.ui.deckHeight;
-
-export const setDeckHeight = (px: number) =>
-  setState("ui", "deckHeight", Math.round(Math.max(DECK_MIN, Math.min(px, window.innerHeight * 0.7))));
-
-/**
- * Show a task in the deck. `load` leaves the deck's height alone (clicking a
- * card shouldn't yank the board out from under you), `raise` opens it, `max`
- * hands the view over.
- */
-export function showInDeck(taskId: string, posture: "load" | "raise" | "max" = "raise") {
-  setState(
-    "ui",
-    produce((ui) => {
-      ui.deckTaskId = taskId;
-      ui.termHome[taskKey(taskId)] = "deck";
-      if (posture === "max") ui.deckState = "max";
-      else if (posture === "raise" || ui.deckState === "rail") ui.deckState = posture === "load" ? ui.deckState : "open";
-      if (posture === "load" && ui.deckState === "rail") ui.deckState = "open";
-    }),
-  );
-}
-
-export const setDeckState = (deckState: Ui["deckState"]) => setState("ui", "deckState", deckState);
-export const toggleDeck = () => setDeckState(state.ui.deckState === "rail" ? "open" : "rail");
 export const selectGroup = (projectId: string, groupId: string | null) => setState("ui", "groupByProject", projectId, groupId);
 export const openInspector = (scriptId: string | null) => setState("ui", "inspectorScriptId", scriptId);
 export const toggleInspector = () => openInspector(state.ui.inspectorScriptId ? null : activeScriptId());
@@ -524,35 +447,16 @@ export async function stopScope(projectId: string) {
 export const continueGroup = (groupId: string) => attempt(backend.groupContinue(groupId));
 export const stopEverything = () => attempt(backend.stopEverything());
 
-// ---------------------------------------------------------------- AI tasks
+// ---------------------------------------------------------------- board cards
 
-/** From the board the terminal opens in the deck; elsewhere it gets a tab. */
+/** Selects a card on the board and brings its project forward. */
 export function openTask(taskId: string) {
   const t = task(taskId);
   if (!t) return;
   selectProject(t.projectId);
-  if (state.ui.view === "board" || state.ui.termHome[taskKey(taskId)] === "deck") {
-    selectCard(taskId);
-    showInDeck(taskId, "raise");
-    return;
-  }
-  ensureTab(taskKey(taskId), true);
-  setState("ui", "view", "terminals");
+  setView("board");
+  selectCard(taskId);
 }
-
-/** Pin a task's terminal into the Terminals view instead of the deck. */
-export function pinTaskToTab(taskId: string) {
-  setState("ui", "termHome", taskKey(taskId), "tab");
-  ensureTab(taskKey(taskId), true);
-  setView("terminals");
-}
-
-export async function startTask(taskId: string) {
-  openTask(taskId);
-  await attempt(backend.taskStart(taskId));
-}
-
-export const stopTask = (taskId: string) => attempt(backend.taskStop(taskId));
 
 export async function saveTask(next: Task) {
   const saved = await attempt(backend.taskSave(plain(next)));
@@ -565,44 +469,21 @@ export async function saveTask(next: Task) {
 }
 
 export async function deleteTask(taskId: string) {
-  closeTab(taskKey(taskId));
   await attempt(backend.taskDelete(taskId));
   setState("tasks", (list) => list.filter((t) => t.id !== taskId));
 }
 
 export const setTaskStatus = (t: Task, status: Task["status"]) => saveTask({ ...t, status });
 
-/** Commits, pushes and opens the PR, reporting what happened either way. */
-export async function publishTask(taskId: string) {
-  const what = await attempt(backend.taskPublish(taskId));
-  if (what === undefined) return;
-  toast(what, "info");
-  // The PR url lands on the task, so refresh it from the backend.
-  const list = await attempt(backend.taskList(state.ui.projectId!));
-  if (list) setState("tasks", reconcile(list, { key: "id" }));
-}
-
-/** The task's isolated checkout, or null when it has none. */
-export const taskWorkspace = (taskId: string) => backend.taskWorkspace(taskId);
-
 /**
- * Throws the task's checkout away. Tries gently first: the backend refuses
- * while work is uncommitted, and only then is the user asked to confirm —
- * so the warning names what would actually be lost.
+ * Moves a card to a column, optionally above another card. The backend
+ * renumbers the whole project, so take its answer rather than guessing.
  */
-export async function discardWorkspace(taskId: string) {
-  try {
-    await backend.taskWorkspaceDiscard(taskId, false);
-    toast("Workspace discarded", "info");
-  } catch (e) {
-    const why = errText(e);
-    if (!why.includes("uncommitted")) return toast(why, "error");
-    const ok = await confirmAction(`${why}.\n\nDiscard it anyway?`, "Discard");
-    if (!ok) return;
-    if (await attempt(backend.taskWorkspaceDiscard(taskId, true)) !== undefined) {
-      toast("Workspace discarded", "info");
-    }
-  }
+export async function moveTask(taskId: string, status: Task["status"], before: string | null = null) {
+  const order = await attempt(backend.taskMove(taskId, status, before));
+  if (!order) return;
+  const projectId = task(taskId)?.projectId;
+  setState("tasks", (list) => [...list.filter((t) => t.projectId !== projectId), ...order]);
 }
 
 /** `""` composes a new task; a task id edits that one. */
@@ -610,12 +491,9 @@ export const openComposer = (taskId: string | "" = "") => setState("ui", "compos
 export const closeComposer = () => setState("ui", "composerTaskId", null);
 
 export function newTaskDraft(projectId: string): Task {
-  const preferred = state.agents.find((a) => a.available) ?? state.agents[0];
   return {
-    id: "", projectId, title: "", goal: "", agentId: preferred?.id ?? "", model: null,
-    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, baseBranch: null, prUrl: null, prNumber: null, after: [], verify: [],
-    status: "backlog", priority: 1, assignee: preferred ? `agent:${preferred.id}` : null, labels: [],
-    issueUrl: null, budgetTokens: null, budgetSeconds: null,
+    id: "", projectId, title: "", goal: "", after: [],
+    status: "backlog", priority: 1, assignee: null, labels: [], issueUrl: null,
     createdAt: Date.now(), updatedAt: Date.now(), sortOrder: tasksOf(projectId).length,
   };
 }
@@ -733,8 +611,6 @@ function onMenu(id: string) {
       return void beginAddProject();
     case "new-task":
       return pid && openComposer("");
-    case "toggle-deck":
-      return toggleDeck();
     case "import-toml":
       return pid && void importToml(pid, state.settings.importMode);
     case "export-toml":

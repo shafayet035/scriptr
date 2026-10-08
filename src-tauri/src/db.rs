@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{params, Connection, Row};
 
-use crate::model::{Group, HistoryEntry, Project, Script, Settings, Task, TaskRun};
+use crate::model::{Group, HistoryEntry, Project, Script, Settings, Task};
 
 pub type DbResult<T> = Result<T, String>;
 
@@ -18,15 +18,6 @@ fn to_json<T: serde::Serialize>(v: &T) -> DbResult<String> {
     serde_json::to_string(v).map_err(err)
 }
 
-/// Reads a nullable JSON text column; SQL NULL (an older row) reads as `None`.
-fn opt_json<T: serde::de::DeserializeOwned>(r: &Row<'_>, i: usize) -> rusqlite::Result<Option<T>> {
-    match r.get::<_, Option<String>>(i)? {
-        None => Ok(None),
-        Some(s) => serde_json::from_str(&s)
-            .map(Some)
-            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(i, rusqlite::types::Type::Text, Box::new(e))),
-    }
-}
 
 /// Reads a JSON text column.
 fn json<T: serde::de::DeserializeOwned>(r: &Row<'_>, i: usize) -> rusqlite::Result<T> {
@@ -87,44 +78,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title           TEXT NOT NULL,
     goal            TEXT NOT NULL,
-    agent_id        TEXT NOT NULL,
-    model           TEXT,
-    autonomy        TEXT NOT NULL,
-    effort          TEXT,
-    workspace       TEXT NOT NULL,
-    branch          TEXT,
-    base_branch     TEXT,
-    pr_url          TEXT,
-    pr_number       INTEGER,
     after           TEXT NOT NULL,
-    verify          TEXT NOT NULL,
     status          TEXT NOT NULL,
     priority        INTEGER NOT NULL DEFAULT 0,
     assignee        TEXT,
     labels          TEXT NOT NULL,
     issue_url       TEXT,
-    budget_tokens   INTEGER,
-    budget_seconds  INTEGER,
     created_at      INTEGER NOT NULL,
     updated_at      INTEGER NOT NULL,
     sort_order      INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS task_runs (
-    id          TEXT PRIMARY KEY,
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    state       TEXT NOT NULL,
-    pid         INTEGER,
-    started_at  INTEGER,
-    ended_at    INTEGER,
-    exit_code   INTEGER,
-    session_id  TEXT,
-    turns       INTEGER,
-    cost_usd    REAL,
-    tokens_in   INTEGER,
-    tokens_out  INTEGER,
-    summary     TEXT
-);
-CREATE INDEX IF NOT EXISTS task_runs_task ON task_runs(task_id, started_at);
 -- Relationships are rows, not JSON: the database enforces that a dependency
 -- points at something real and removes the edge when either end is deleted.
 -- The foreign keys are DEFERRABLE so a batch (a scriptr.toml import) can write
@@ -150,13 +113,6 @@ CREATE TABLE IF NOT EXISTS task_deps (
     PRIMARY KEY (task_id, depends_on)
 );
 CREATE INDEX IF NOT EXISTS task_deps_on ON task_deps(depends_on);
-CREATE TABLE IF NOT EXISTS task_verify (
-    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    script_id   TEXT NOT NULL REFERENCES scripts(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    position    INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (task_id, script_id)
-);
-CREATE INDEX IF NOT EXISTS task_verify_script ON task_verify(script_id);
 "#;
 
 /// One link table's shape: `links(left, right)` ordered by position.
@@ -170,11 +126,10 @@ struct Link {
     legacy: (&'static str, &'static str),
 }
 
-const LINKS: [Link; 4] = [
+const LINKS: [Link; 3] = [
     Link { table: "script_deps", left: "script_id", right: "depends_on", right_table: "scripts", legacy: ("scripts", "after") },
     Link { table: "group_scripts", left: "group_id", right: "script_id", right_table: "scripts", legacy: ("groups", "script_ids") },
     Link { table: "task_deps", left: "task_id", right: "depends_on", right_table: "tasks", legacy: ("tasks", "after") },
-    Link { table: "task_verify", left: "task_id", right: "script_id", right_table: "scripts", legacy: ("tasks", "verify") },
 ];
 
 pub struct Db {
@@ -203,6 +158,7 @@ impl Db {
     fn init(mut conn: Connection, path: PathBuf) -> DbResult<Self> {
         conn.execute_batch(SCHEMA).map_err(err)?;
         Self::migrate_links(&mut conn)?;
+        Self::migrate_board(&mut conn)?;
         // `CREATE TABLE IF NOT EXISTS` leaves older databases untouched, so
         // columns added after a release are patched in here.
         Self::add_column(&conn, "tasks", "effort", "TEXT")?;
@@ -252,6 +208,59 @@ impl Db {
             log::info!("migrated {moved} {}.{column} links into {}", table, link.table);
         }
         tx.commit().map_err(err)
+    }
+
+    /// Rebuilds `tasks` as a board card when it still carries the agent-era
+    /// columns, mapping the runner's phases onto the board's columns. One way:
+    /// an older build cannot read the result, which is the point — those
+    /// columns described a runner that no longer exists.
+    fn migrate_board(conn: &mut Connection) -> DbResult<()> {
+        if !Self::has_column(conn, "tasks", "agent_id")? {
+            return Ok(());
+        }
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute_batch(
+            r#"
+CREATE TABLE tasks_new (
+    id              TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    goal            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    priority        INTEGER NOT NULL DEFAULT 0,
+    assignee        TEXT,
+    labels          TEXT NOT NULL,
+    issue_url       TEXT,
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    sort_order      INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO tasks_new
+SELECT id, project_id, title, goal,
+       CASE status
+         WHEN 'queued'     THEN 'todo'
+         WHEN 'working'    THEN 'doing'
+         WHEN 'verifying'  THEN 'doing'
+         WHEN 'publishing' THEN 'doing'
+         WHEN 'failed'     THEN 'backlog'
+         WHEN 'cancelled'  THEN 'backlog'
+         WHEN 'review'     THEN 'review'
+         WHEN 'done'       THEN 'done'
+         ELSE 'backlog'
+       END,
+       priority, assignee, labels, issue_url, created_at, updated_at, sort_order
+FROM tasks;
+DROP TABLE tasks;
+ALTER TABLE tasks_new RENAME TO tasks;
+DROP TABLE IF EXISTS task_runs;
+DROP TABLE IF EXISTS task_verify;
+"#,
+        )
+        .map_err(err)?;
+        let moved: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |r| r.get(0)).map_err(err)?;
+        tx.commit().map_err(err)?;
+        log::info!("migrated {moved} task(s) to board cards; dropped the agent-era columns");
+        Ok(())
     }
 
     fn has_column(conn: &Connection, table: &str, column: &str) -> DbResult<bool> {
@@ -608,9 +617,8 @@ impl Db {
 
     // ---- tasks ----------------------------------------------------------
 
-    const TASK_COLS: &'static str = "id, project_id, title, goal, agent_id, model, autonomy, effort, workspace, \
-         branch, base_branch, pr_url, pr_number, status, priority, assignee, labels, issue_url, budget_tokens, \
-         budget_seconds, created_at, updated_at, sort_order";
+    const TASK_COLS: &'static str =
+        "id, project_id, title, goal, status, priority, assignee, labels, issue_url, created_at, updated_at, sort_order";
 
     fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
         Ok(Task {
@@ -618,27 +626,15 @@ impl Db {
             project_id: r.get(1)?,
             title: r.get(2)?,
             goal: r.get(3)?,
-            agent_id: r.get(4)?,
-            model: r.get(5)?,
-            autonomy: json(r, 6)?,
-            effort: opt_json(r, 7)?,
-            workspace: json(r, 8)?,
-            branch: r.get(9)?,
-            base_branch: r.get(10)?,
-            pr_url: r.get(11)?,
-            pr_number: r.get(12)?,
             after: Vec::new(),
-            verify: Vec::new(),
-            status: json(r, 13)?,
-            priority: r.get(14)?,
-            assignee: r.get(15)?,
-            labels: json(r, 16)?,
-            issue_url: r.get(17)?,
-            budget_tokens: r.get(18)?,
-            budget_seconds: r.get(19)?,
-            created_at: r.get(20)?,
-            updated_at: r.get(21)?,
-            sort_order: r.get(22)?,
+            status: json(r, 4)?,
+            priority: r.get(5)?,
+            assignee: r.get(6)?,
+            labels: json(r, 7)?,
+            issue_url: r.get(8)?,
+            created_at: r.get(9)?,
+            updated_at: r.get(10)?,
+            sort_order: r.get(11)?,
         })
     }
 
@@ -656,10 +652,8 @@ impl Db {
         .map_err(err)?;
         let mut tasks: Vec<Task> = rows.collect::<Result<_, _>>().map_err(err)?;
         let deps = Self::link_map(&conn, &LINKS[2])?;
-        let verify = Self::link_map(&conn, &LINKS[3])?;
         for t in &mut tasks {
             t.after = deps.get(&t.id).cloned().unwrap_or_default();
-            t.verify = verify.get(&t.id).cloned().unwrap_or_default();
         }
         Ok(tasks)
     }
@@ -679,8 +673,7 @@ impl Db {
         let tx = conn.transaction().map_err(err)?;
         tx.execute(
             &format!(
-                "INSERT OR REPLACE INTO tasks ({}) VALUES \
-                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                "INSERT OR REPLACE INTO tasks ({}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 Self::TASK_COLS
             ),
             params![
@@ -688,22 +681,11 @@ impl Db {
                 t.project_id,
                 t.title,
                 t.goal,
-                t.agent_id,
-                t.model,
-                to_json(&t.autonomy)?,
-                t.effort.as_ref().map(to_json).transpose()?,
-                to_json(&t.workspace)?,
-                t.branch,
-                t.base_branch,
-                t.pr_url,
-                t.pr_number,
                 to_json(&t.status)?,
                 t.priority,
                 t.assignee,
                 to_json(&t.labels)?,
                 t.issue_url,
-                t.budget_tokens,
-                t.budget_seconds,
                 t.created_at,
                 t.updated_at,
                 t.sort_order
@@ -711,7 +693,6 @@ impl Db {
         )
         .map_err(err)?;
         Self::replace_links(&tx, &LINKS[2], &t.id, &t.after)?;
-        Self::replace_links(&tx, &LINKS[3], &t.id, &t.verify)?;
         tx.commit().map_err(err)
     }
 
@@ -721,66 +702,6 @@ impl Db {
         self.conn().execute("DELETE FROM tasks WHERE id = ?1", [id]).map(drop).map_err(err)
     }
 
-    const TASK_RUN_COLS: &'static str = "id, task_id, state, pid, started_at, ended_at, exit_code, \
-         session_id, turns, cost_usd, tokens_in, tokens_out, summary";
-
-    pub fn task_runs(&self, task_id: &str) -> DbResult<Vec<TaskRun>> {
-        let conn = self.conn();
-        let sql = format!(
-            "SELECT {} FROM task_runs WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 100",
-            Self::TASK_RUN_COLS
-        );
-        let mut stmt = conn.prepare(&sql).map_err(err)?;
-        let rows = stmt
-            .query_map([task_id], |r| {
-                Ok(TaskRun {
-                    id: r.get(0)?,
-                    task_id: r.get(1)?,
-                    state: json(r, 2)?,
-                    pid: r.get(3)?,
-                    started_at: r.get(4)?,
-                    ended_at: r.get(5)?,
-                    exit_code: r.get(6)?,
-                    session_id: r.get(7)?,
-                    turns: r.get(8)?,
-                    cost_usd: r.get(9)?,
-                    tokens_in: r.get(10)?,
-                    tokens_out: r.get(11)?,
-                    summary: r.get(12)?,
-                })
-            })
-            .map_err(err)?;
-        rows.collect::<Result<_, _>>().map_err(err)
-    }
-
-    /// Inserted when an attempt is created, then rewritten as it progresses.
-    pub fn upsert_task_run(&self, r: &TaskRun) -> DbResult<()> {
-        self.conn()
-            .execute(
-                &format!(
-                    "INSERT OR REPLACE INTO task_runs ({}) VALUES \
-                     (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                    Self::TASK_RUN_COLS
-                ),
-                params![
-                    r.id,
-                    r.task_id,
-                    to_json(&r.state)?,
-                    r.pid,
-                    r.started_at,
-                    r.ended_at,
-                    r.exit_code,
-                    r.session_id,
-                    r.turns,
-                    r.cost_usd,
-                    r.tokens_in,
-                    r.tokens_out,
-                    r.summary
-                ],
-            )
-            .map(drop)
-            .map_err(err)
-    }
 
     /// Writes a consistent copy of the database to `dest`.
     pub fn backup(&self, dest: &str) -> DbResult<()> {
@@ -791,7 +712,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Autonomy, Effort, Gate, RestartPolicy, RunState, TaskStatus, WorkspaceMode};
+    use crate::model::{Gate, RestartPolicy, TaskStatus};
 
     /// A database with one project, ready for scripts and tasks.
     fn seeded() -> Db {
@@ -859,27 +780,15 @@ mod tests {
     fn sample_task(id: &str) -> Task {
         Task {
             id: id.into(),
-            project_id: "p".into(),
             title: "Fix the flaky test".into(),
             goal: "The \"api\" suite fails\nsometimes. Fix it.".into(),
-            agent_id: "claude-code".into(),
-            model: Some("opus".into()),
-            autonomy: Autonomy::AutoEdit,
-            effort: Some(Effort::Extra),
-            workspace: WorkspaceMode::InPlace,
-            branch: Some("task/flaky".into()),
-            base_branch: Some("main".into()),
-            pr_url: Some("https://github.com/x/y/pull/7".into()),
-            pr_number: Some(7),
+            project_id: "p".into(),
             after: vec![],
-            verify: vec!["test".into()],
             status: TaskStatus::Backlog,
             priority: 3,
-            assignee: Some("agent:claude-code".into()),
+            assignee: Some("me".into()),
             labels: vec!["bug".into(), "ci".into()],
             issue_url: Some("https://github.com/x/y/issues/1".into()),
-            budget_tokens: Some(200_000),
-            budget_seconds: Some(900),
             created_at: 1,
             updated_at: 2,
             sort_order: 0,
@@ -888,49 +797,24 @@ mod tests {
 
     #[test]
     fn tasks_round_trip_every_field() {
-        let db = Db::open_in_memory().unwrap();
-        db.insert_project(&Project { id: "p".into(), name: "P".into(), path: "/tmp".into(), branch: None,
-        sort_order: 0 })
-            .unwrap();
+        let db = seeded();
         let a = sample_task("a");
         let mut b = sample_task("b");
         b.id = "b".into();
         b.after = vec!["a".into()];
-        b.model = None;
-        b.workspace = WorkspaceMode::Worktree;
         b.status = TaskStatus::Review;
-        b.autonomy = Autonomy::Full;
+        b.assignee = None;
         b.sort_order = 1;
-        db.upsert_script(&sample_script("test", "p", "test")).unwrap();
         db.upsert_task(&a).unwrap();
         db.upsert_task(&b).unwrap();
         assert_eq!(db.task("a").unwrap(), a);
         assert_eq!(db.task("b").unwrap(), b);
         assert_eq!(db.project_tasks("p").unwrap(), vec![a.clone(), b.clone()]);
 
-        let mut run = TaskRun::queued("r1".into(), "a");
-        db.upsert_task_run(&run).unwrap();
-        run.state = RunState::Stopped;
-        run.pid = Some(4321);
-        run.started_at = Some(10);
-        run.ended_at = Some(20);
-        run.exit_code = Some(0);
-        run.session_id = Some("ses_1".into());
-        run.turns = Some(4);
-        run.cost_usd = Some(0.0731);
-        run.tokens_in = Some(2400);
-        run.tokens_out = Some(132);
-        run.summary = Some("done".into());
-        db.upsert_task_run(&run).unwrap();
-        assert_eq!(db.task_runs("a").unwrap(), vec![run]);
-
-        // Deleting a task scrubs it from dependents and takes its runs with it.
+        // Deleting a card scrubs it from whatever it was blocking.
         db.delete_task("a").unwrap();
         assert!(db.task("b").unwrap().after.is_empty());
-        assert!(db.task_runs("a").unwrap().is_empty());
-
-        db.delete_project("p").unwrap();
-        assert!(db.project_tasks("p").unwrap().is_empty());
+        assert!(db.task("a").is_err());
     }
 
     // ---- link tables ----------------------------------------------------
@@ -1009,22 +893,21 @@ mod tests {
     }
 
     #[test]
-    fn task_dependencies_and_verify_lists_cascade_too() {
+    fn a_blocked_card_loses_the_edge_when_its_blocker_goes() {
         let db = seeded();
-        db.upsert_script(&sample_script("test", "p", "test")).unwrap();
-        let first = sample_task("t1");
-        db.upsert_task(&first).unwrap();
+        db.upsert_task(&sample_task("t1")).unwrap();
         let mut second = sample_task("t2");
         second.after = vec!["t1".into()];
-        second.verify = vec!["test".into()];
         db.upsert_task(&second).unwrap();
         assert_eq!(db.task("t2").unwrap().after, vec!["t1".to_string()]);
-        assert_eq!(db.task("t2").unwrap().verify, vec!["test".to_string()]);
 
         db.delete_task("t1").unwrap();
         assert_eq!(db.task("t2").unwrap().after, Vec::<String>::new());
-        db.delete_script("test").unwrap();
-        assert_eq!(db.task("t2").unwrap().verify, Vec::<String>::new());
+
+        // And a card cannot be blocked by one that was never there.
+        let mut ghost = sample_task("t3");
+        ghost.after = vec!["nope".into()];
+        assert!(db.upsert_task(&ghost).is_err());
     }
 
     /// An older database keeps its relationships and loses the JSON columns.

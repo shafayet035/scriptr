@@ -1,47 +1,32 @@
 import { isTaskBusy } from "../../lib/format";
 import { openUrl } from "../../lib/ipc";
 import type { MenuEntry } from "../../lib/menu";
-import type { Task } from "../../lib/types";
-import {
-  deleteTask,
-  discardWorkspace,
-  publishTask,
-  openComposer,
-  openTask,
-  setTaskStatus,
-  startTask,
-  stopTask,
-  taskRunOf,
-} from "../../store/app";
+import type { Task, TaskStatus } from "../../lib/types";
+import { deleteTask, moveTask, openComposer } from "../../store/app";
 
 export const isWorking = (t: Task) => isTaskBusy(t.status);
 
-/** One menu for a task, wherever it is shown: card, deck header, sidebar row. */
+const COLUMNS: { status: TaskStatus; label: string }[] = [
+  { status: "backlog", label: "Backlog" },
+  { status: "todo", label: "To do" },
+  { status: "doing", label: "In progress" },
+  { status: "review", label: "Review" },
+  { status: "done", label: "Done" },
+];
+
+/** One menu for a card, wherever it is shown: board, sidebar row, palette. */
 export function taskMenu(t: Task): MenuEntry[] {
-  const ran = !!taskRunOf(t.id);
   return [
-    isWorking(t)
-      ? { label: "Stop agent", action: () => void stopTask(t.id) }
-      : { label: ran ? "Run again" : "Run", action: () => void startTask(t.id) },
-    { label: "Show terminal", action: () => openTask(t.id) },
     { label: "Edit…", action: () => openComposer(t.id) },
-    ...(t.prUrl
-      ? [{ label: `Open pull request #${t.prNumber ?? ""}`.trim(), action: () => void openUrl(t.prUrl!) }]
-      : []),
-    {
-      label: t.prUrl ? "Push and update the PR" : "Publish — commit, push, open a PR",
-      enabled: t.workspace === "worktree" && !!t.branch && !isWorking(t),
-      action: () => void publishTask(t.id),
-    },
+    ...(t.issueUrl ? [{ label: "Open linked issue", action: () => void openUrl(t.issueUrl!) }] : []),
     { separator: true },
-    { label: "Mark as done", enabled: t.status !== "done", action: () => void setTaskStatus(t, "done") },
-    { label: "Move to backlog", enabled: t.status !== "backlog", action: () => void setTaskStatus(t, "backlog") },
+    // Moving to the end of a column is the common case; dragging handles the rest.
+    ...COLUMNS.map((c) => ({
+      label: `Move to ${c.label}`,
+      enabled: t.status !== c.status,
+      action: () => void moveTask(t.id, c.status),
+    })),
     { separator: true },
-    {
-      label: "Discard workspace…",
-      enabled: t.workspace === "worktree" && !!t.branch && !isWorking(t),
-      action: () => void discardWorkspace(t.id),
-    },
     { label: "Delete", action: () => void deleteTask(t.id) },
   ];
 }

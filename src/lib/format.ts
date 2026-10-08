@@ -1,4 +1,4 @@
-import type { Autonomy, Gate, RunInfo, RunState, Script, TaskStatus } from "./types";
+import type { Gate, RunInfo, RunState, Script, TaskStatus } from "./types";
 
 export function displayName(s: Pick<Script, "name" | "label">): string {
   return s.label ? `${s.name} · ${s.label}` : s.name;
@@ -128,23 +128,17 @@ export function runBadge(run: RunInfo, now: number): { text: string; tone: strin
  * runner owns its status. One definition, because four copies drifted the
  * first time a phase was added.
  */
-export const isTaskBusy = (status: TaskStatus) =>
-  status === "queued" || status === "working" || status === "verifying" || status === "publishing";
+export const isTaskBusy = (status: TaskStatus) => status === "doing";
 
 /** Task status reuses the status palette: working is live, review wants a human, failed is a crash. */
-export function taskTone(status: TaskStatus): "running" | "starting" | "queued" | "crashed" | "stopped" | "review" {
+export function taskTone(status: TaskStatus): "running" | "queued" | "review" | "stopped" {
   switch (status) {
-    case "working":
+    case "doing":
       return "running";
-    case "verifying":
-    case "publishing":
-      return "starting";
-    case "queued":
+    case "todo":
       return "queued";
     case "review":
       return "review";
-    case "failed":
-      return "crashed";
     default:
       return "stopped";
   }
@@ -152,21 +146,12 @@ export function taskTone(status: TaskStatus): "running" | "starting" | "queued" 
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   backlog: "Backlog",
-  queued: "Queued",
-  working: "Working",
-  verifying: "Verifying",
-  publishing: "Publishing",
-  review: "Needs review",
+  todo: "To do",
+  doing: "In progress",
+  review: "Review",
   done: "Done",
-  failed: "Failed",
-  cancelled: "Cancelled",
 };
 
-export const AUTONOMY_LABEL: Record<Autonomy, string> = {
-  ask: "Ask first",
-  "auto-edit": "Auto-edit",
-  full: "Full autonomy",
-};
 
 export const PRIORITY_LABEL = ["None", "Low", "Medium", "High"];
 

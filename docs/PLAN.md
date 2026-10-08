@@ -34,6 +34,7 @@ src/                      Solid frontend
   store/                  Solid stores (projects, runs, ui)
   components/             TitleBar, Sidebar, Toolbar, TabBar, CommandBar, TerminalView, StatusBar, …
   screens/                Welcome, AddProjectModal, Workspace, Inspector, DependencyView, CrashBanner, CommandPalette, Settings
+  screens/board/          Kanban board: BoardCanvas (columns, drag-and-drop), TaskCard, taskMenu
 src-tauri/src/
   main.rs / lib.rs        builder, plugins, menu, vibrancy
   model.rs                Project/Script/Group/Gate/RestartPolicy/RunState (serde, camelCase)
@@ -45,7 +46,10 @@ src-tauri/src/
   scheduler.rs            group run by waves, reverse shutdown
   config.rs               scriptr.toml export/import
   stats.rs                sysinfo sampler
+  tasks.rs                board cards: create, move/reorder
+  mcp_api.rs              loopback control API behind a bearer token
   commands.rs             #[tauri::command] surface
+crates/scriptr-mcp/       stdio MCP bridge an AI client talks to (sidecar)
 ```
 
 ## Milestones & status
@@ -56,7 +60,13 @@ src-tauri/src/
 - [x] **M4** groups, DAG, waves, gates; dependency view (screen 05); inspector (screen 04)
 - [x] **M5** restart policy, crash banner (screen 06), exit history
 - [x] **M6** command palette (07), terminal search, export/import + settings (08)
+- [x] **M7a** Kanban board for tasks, plus an MCP server so an AI client can read and drive it
 - [ ] **M7** packaging, signing, auto-update
+
+An earlier direction — running coding agents (Claude Code, opencode) inside
+Scriptr, with worktrees, verification gates and PR publishing — was built and
+then removed. Scriptr runs your processes and holds your board; the agent work
+happens in whichever AI client you prefer, driving both over MCP.
 
 Known gaps: Windows stop kills only the direct child (Job Objects + CTRL_BREAK TODO) · HTTP gate is http:// only · `onQuit: "leave"` can't survive PTY close (SIGHUP) · lazy-load xterm to trim the 520 KB main chunk.
 

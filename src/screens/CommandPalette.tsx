@@ -1,16 +1,13 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { Icon, type IconName } from "../components/Icon";
 import { computePlan } from "../lib/graph";
-import { isLive, isTaskBusy, tildify, TASK_STATUS_LABEL } from "../lib/format";
+import { isLive, tildify, TASK_STATUS_LABEL } from "../lib/format";
 import { isMac } from "../lib/ipc";
 import {
-  agent,
   beginAddProject,
   exportToml,
   openComposer,
   openTask,
-  startTask,
-  stopTask,
   openInspector,
   openScript,
   openSettings,
@@ -123,27 +120,26 @@ export function CommandPalette() {
       if (verb === "edit") add("Edit", "settings", "var(--text-secondary)", 3, editIt);
     }
 
-    // agent tasks
-    if (!verb || verb === "run" || verb === "start" || verb === "stop" || verb === "open" || verb === "edit") {
+    // board cards: jump to one, or open it for editing
+    if (!verb || verb === "open" || verb === "edit") {
       for (const t of state.tasks) {
         const m = fuzzy(q, t.title);
         if (!m) continue;
-        const working = isTaskBusy(t.status);
-        const meta = `${TASK_STATUS_LABEL[t.status]} · ${agent(t.agentId)?.name ?? t.agentId}`;
+        const meta = `${TASK_STATUS_LABEL[t.status]}${t.assignee ? ` · ${t.assignee}` : ""}`;
         const base = m.score + (t.projectId === current ? 2 : 0);
-        if (working && verb !== "edit") {
-          out.push({ key: `task-stop:${t.id}`, section: "Tasks", icon: "stop", iconColor: "var(--status-crashed)", verb: "Stop",
-            name: t.title, nameHits: m.hits, rest: "", meta, score: base + (verb === "stop" ? 3 : 0), run: () => void stopTask(t.id) });
-        } else if (verb !== "edit" && verb !== "stop") {
-          out.push({ key: `task-run:${t.id}`, section: "Tasks", icon: "play", iconColor: "var(--status-running)",
-            verb: t.status === "backlog" ? "Run" : "Run again", name: t.title, nameHits: m.hits, rest: "", meta,
-            score: base + (verb ? 3 : 0.5), run: () => void startTask(t.id) });
-        }
-        if (verb === "edit" || verb === "open" || !verb) {
-          out.push({ key: `task-open:${t.id}`, section: "Tasks", icon: "terminal", iconColor: "var(--text-secondary)",
-            verb: verb === "edit" ? "Edit" : "Open", name: t.title, nameHits: m.hits, rest: "", meta, score: base - 1,
-            run: () => (verb === "edit" ? openComposer(t.id) : openTask(t.id)) });
-        }
+        out.push({
+          key: `task-open:${t.id}`,
+          section: "Tasks",
+          icon: "layers",
+          iconColor: "var(--text-secondary)",
+          verb: verb === "edit" ? "Edit" : "Open",
+          name: t.title,
+          nameHits: m.hits,
+          rest: "",
+          meta,
+          score: base + (verb ? 2 : 0),
+          run: () => (verb === "edit" ? openComposer(t.id) : openTask(t.id)),
+        });
       }
     }
 
@@ -192,7 +188,7 @@ export function CommandPalette() {
     if (!verb) {
       const actions: [string, IconName, string, string, string | undefined, () => void][] = [
         ["Stop everything", "power", "var(--status-crashed)", "all projects", `${CMD}⇧.`, () => void stopEverything()],
-        ["New task…", "plus", "var(--text-secondary)", "hand work to an agent", undefined, () => current && openComposer("")],
+        ["New card…", "plus", "var(--text-secondary)", "add work to the board", undefined, () => current && openComposer("")],
         ["Add project…", "folder-plus", "var(--text-secondary)", "scan a folder", `${CMD}O`, () => void beginAddProject()],
         ["Show dependencies", "graph", "var(--text-secondary)", "current group", `${CMD}2`, () => setView("deps")],
         ["Export scriptr.toml", "arrow-up", "var(--text-secondary)", "current project", undefined, () => current && void exportToml(current)],

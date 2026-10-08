@@ -78,11 +78,14 @@ pub fn remove_config() {
 type Fut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 /// Reads recent output for a `script:<id>` or `task:<id>` key.
 type LogReader = Arc<dyn Fn(&str, usize) -> Result<String, String> + Send + Sync>;
+/// Moves a card to a column and a position within it.
+type CardMover = Arc<dyn Fn(String, TaskStatus, Option<String>) -> Fut<Result<(), String>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Hooks {
     pub running_scripts: Arc<dyn Fn() -> usize + Send + Sync>,
     pub on_task: Arc<dyn Fn(&Task) + Send + Sync>,
+    pub move_task: CardMover,
     /// Live state for one script.
     pub run_info: Arc<dyn Fn(&str) -> RunInfo + Send + Sync>,
     pub start_script: Arc<dyn Fn(String) -> Result<(), String> + Send + Sync>,
@@ -91,12 +94,6 @@ pub struct Hooks {
     pub run_group: Arc<dyn Fn(String) -> Fut<Result<(), String>> + Send + Sync>,
     /// Recent output for `script:<id>` or `task:<id>`, ANSI already stripped.
     pub logs: LogReader,
-    pub start_task: Arc<dyn Fn(String) -> Fut<Result<(), String>> + Send + Sync>,
-    pub stop_task: Arc<dyn Fn(String) -> Fut<Result<(), String>> + Send + Sync>,
-    /// Commits, pushes and opens the PR; returns what it did.
-    pub publish_task: Arc<dyn Fn(String) -> Fut<Result<String, String>> + Send + Sync>,
-    /// Whether the user has allowed agent runs to be started from outside.
-    pub agent_control: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl Hooks {
@@ -105,16 +102,13 @@ impl Hooks {
         Self {
             running_scripts: Arc::new(|| 0),
             on_task: Arc::new(|_| {}),
+            move_task: Arc::new(|_, _, _| Box::pin(async { Ok(()) })),
             run_info: Arc::new(RunInfo::idle),
             start_script: Arc::new(|_| Ok(())),
             stop_script: Arc::new(|_| Box::pin(async {})),
             restart_script: Arc::new(|_| Box::pin(async { Ok(()) })),
             run_group: Arc::new(|_| Box::pin(async { Ok(()) })),
             logs: Arc::new(|_, _| Ok(String::new())),
-            start_task: Arc::new(|_| Box::pin(async { Ok(()) })),
-            stop_task: Arc::new(|_| Box::pin(async { Ok(()) })),
-            publish_task: Arc::new(|_| Box::pin(async { Ok(String::new()) })),
-            agent_control: Arc::new(|| false),
         }
     }
 }
@@ -131,9 +125,7 @@ pub fn router(db: Arc<crate::db::Db>, token: String, hooks: Hooks) -> Router {
         .route("/v1/projects", get(projects))
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{id}", get(get_task).patch(update_task))
-        .route("/v1/tasks/{id}/start", post(start_task))
-        .route("/v1/tasks/{id}/stop", post(stop_task))
-        .route("/v1/tasks/{id}/publish", post(publish_task))
+        .route("/v1/tasks/{id}/move", post(move_task))
         .route("/v1/scripts", get(list_scripts))
         .route("/v1/scripts/{id}/start", post(start_script))
         .route("/v1/scripts/{id}/stop", post(stop_script))
@@ -157,6 +149,14 @@ pub async fn serve(app: Arc<AppState>, port: u16) -> Result<McpInfo, String> {
         on_task: {
             let app = app.clone();
             Arc::new(move |t: &Task| app.notify_task(t))
+        },
+        move_task: {
+            let db = app.db.clone();
+            Arc::new(move |id: String, status: TaskStatus, before: Option<String>| {
+                let db = db.clone();
+                Box::pin(async move { crate::tasks::move_task(&db, &id, status, before.as_deref()).map(drop) })
+                    as Fut<Result<(), String>>
+            })
         },
         run_info: {
             let sup = app.sup.clone();
@@ -198,34 +198,6 @@ pub async fn serve(app: Arc<AppState>, port: u16) -> Result<McpInfo, String> {
                 };
                 Ok(tail_plain(&terminals.get(&run_key).snapshot(), lines))
             })
-        },
-        start_task: {
-            let tasks = app.tasks.clone();
-            Arc::new(move |id: String| {
-                let tasks = tasks.clone();
-                Box::pin(async move { tasks.start(&id).await }) as Fut<Result<(), String>>
-            })
-        },
-        stop_task: {
-            let tasks = app.tasks.clone();
-            Arc::new(move |id: String| {
-                let tasks = tasks.clone();
-                Box::pin(async move { tasks.stop(&id).await }) as Fut<Result<(), String>>
-            })
-        },
-        publish_task: {
-            let (tasks, db) = (app.tasks.clone(), app.db.clone());
-            Arc::new(move |id: String| {
-                let (tasks, db) = (tasks.clone(), db.clone());
-                Box::pin(async move {
-                    let mut task = db.task(&id)?;
-                    tasks.publish_now(&mut task).await
-                }) as Fut<Result<String, String>>
-            })
-        },
-        agent_control: {
-            let db = app.db.clone();
-            Arc::new(move || db.settings().map(|s| s.mcp_agent_control).unwrap_or(false))
         },
     };
     let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
@@ -299,7 +271,7 @@ async fn status(State(api): ApiState, headers: HeaderMap) -> ApiResult<Status> {
         .iter()
         .filter_map(|p| db.project_tasks(&p.id).ok())
         .flatten()
-        .filter(|t| matches!(t.status, crate::model::TaskStatus::Working | crate::model::TaskStatus::Queued))
+        .filter(|t| matches!(t.status, crate::model::TaskStatus::Doing))
         .count();
     Ok(Json(Status {
         app: "scriptr",
@@ -340,12 +312,9 @@ async fn list_tasks(State(api): ApiState, headers: HeaderMap, Query(q): Query<Ta
     }
 }
 
-async fn create_task(
-    State(api): ApiState,
-    headers: HeaderMap,
-    Json(input): Json<tasks::NewTask>,
-) -> ApiResult<Task> {
+async fn create_task(State(api): ApiState, headers: HeaderMap, body: axum::body::Bytes) -> ApiResult<Task> {
     authed(&api, &headers)?;
+    let input: tasks::NewTask = parse_body(&body)?;
     let project = resolve_project(&api, &input.project)?;
     let task = tasks::create(&api.db, &project.id, &input, "mcp").map_err(bad)?;
     (api.hooks.on_task)(&task);
@@ -354,30 +323,13 @@ async fn create_task(
 
 // ---- tasks ---------------------------------------------------------------
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskDetail {
-    #[serde(flatten)]
-    task: Task,
-    runs: Vec<crate::model::TaskRun>,
-    /// Where the agent's checkout is, when the task has one.
-    workspace_path: Option<String>,
-}
-
-async fn get_task(State(api): ApiState, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<TaskDetail> {
+async fn get_task(State(api): ApiState, headers: HeaderMap, Path(id): Path<String>) -> ApiResult<Task> {
     authed(&api, &headers)?;
-    let task = api.db.task(&id).map_err(not_found)?;
-    let runs = api.db.task_runs(&id).unwrap_or_default();
-    let workspace_path = (task.workspace == crate::model::WorkspaceMode::Worktree)
-        .then(|| crate::worktree::path_for(&id).ok())
-        .flatten()
-        .filter(|p| p.join(".git").exists())
-        .map(|p| p.to_string_lossy().into_owned());
-    Ok(Json(TaskDetail { task, runs, workspace_path }))
+    api.db.task(&id).map(Json).map_err(not_found)
 }
 
-/// Everything an outside agent may change about a filed task. Absent fields
-/// are left alone, so a caller can nudge one thing without reading first.
+/// Everything an outside client may change about a card. Absent fields are
+/// left alone, so a caller can nudge one thing without reading first.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskPatch {
@@ -385,27 +337,24 @@ struct TaskPatch {
     title: Option<String>,
     goal: Option<String>,
     priority: Option<i64>,
-    effort: Option<crate::model::Effort>,
-    base: Option<String>,
-    workspace: Option<crate::model::WorkspaceMode>,
+    assignee: Option<String>,
     labels: Option<Vec<String>>,
     issue_url: Option<String>,
+    /// Task ids this card is blocked by. Replaces the list.
+    after: Option<Vec<String>>,
 }
 
 async fn update_task(
     State(api): ApiState,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(patch): Json<TaskPatch>,
+    body: axum::body::Bytes,
 ) -> ApiResult<Task> {
     authed(&api, &headers)?;
+    let patch: TaskPatch = parse_body(&body)?;
     let mut task = api.db.task(&id).map_err(not_found)?;
 
-    // A running task's status belongs to the runner, not to a caller.
     if let Some(status) = patch.status {
-        if matches!(task.status, TaskStatus::Working | TaskStatus::Queued | TaskStatus::Verifying) {
-            return Err(bad("this task is running — stop it before setting its status"));
-        }
         task.status = status;
     }
     if let Some(t) = patch.title {
@@ -415,22 +364,13 @@ async fn update_task(
         task.title = t.trim().to_string();
     }
     if let Some(g) = patch.goal {
-        if g.trim().is_empty() {
-            return Err(bad("a task needs a goal — it is the prompt the agent gets"));
-        }
         task.goal = g.trim().to_string();
     }
     if let Some(p) = patch.priority {
         task.priority = p.clamp(0, 3);
     }
-    if patch.effort.is_some() {
-        task.effort = patch.effort;
-    }
-    if let Some(b) = patch.base {
-        task.base_branch = Some(b).filter(|b| !b.trim().is_empty());
-    }
-    if let Some(w) = patch.workspace {
-        task.workspace = w;
+    if patch.assignee.is_some() {
+        task.assignee = patch.assignee;
     }
     if let Some(l) = patch.labels {
         task.labels = l;
@@ -438,63 +378,39 @@ async fn update_task(
     if patch.issue_url.is_some() {
         task.issue_url = patch.issue_url;
     }
+    if let Some(after) = patch.after {
+        // A card blocking itself would hang the board's ordering.
+        if after.iter().any(|a| a == &id) {
+            return Err(bad("a task cannot be blocked by itself"));
+        }
+        task.after = after;
+    }
     task.updated_at = now_ms();
     api.db.upsert_task(&task).map_err(bad)?;
     (api.hooks.on_task)(&task);
     Ok(Json(task))
 }
 
-/// The one gated verb: starting a run spends tokens and writes code.
-///
-/// `_body` is taken on every action route although none of them has a payload:
-/// hyper does not drain a body no extractor asked for, and resets the
-/// connection instead — which would throw away the error text the caller needs.
-async fn start_task(
-    State(api): ApiState,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    _body: axum::body::Bytes,
-) -> ApiResult<Task> {
-    authed(&api, &headers)?;
-    if !(api.hooks.agent_control)() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "starting agent runs from outside is off — turn on \"Let agents start runs\" in \
-             Scriptr's Settings, or press Run on the board"
-                .into(),
-        ));
-    }
-    api.db.task(&id).map_err(not_found)?;
-    (api.hooks.start_task)(id.clone()).await.map_err(bad)?;
-    api.db.task(&id).map(Json).map_err(bad)
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveTask {
+    status: TaskStatus,
+    /// Put the card before this one; omitted means last in the column.
+    before: Option<String>,
 }
 
-async fn stop_task(
+/// Moves a card to a column and a position, the way a drag-and-drop would.
+async fn move_task(
     State(api): ApiState,
     headers: HeaderMap,
     Path(id): Path<String>,
-    _body: axum::body::Bytes,
+    body: axum::body::Bytes,
 ) -> ApiResult<Task> {
     authed(&api, &headers)?;
+    let mv: MoveTask = parse_body(&body)?;
     api.db.task(&id).map_err(not_found)?;
-    (api.hooks.stop_task)(id.clone()).await.map_err(bad)?;
+    (api.hooks.move_task)(id.clone(), mv.status, mv.before).await.map_err(bad)?;
     api.db.task(&id).map(Json).map_err(bad)
-}
-
-/// Publishing is not gated: it pushes a branch the agent already wrote and
-/// opens a PR nobody has merged. The gate is on *merging*, which Scriptr never
-/// does on its own, and on starting runs, which spends money.
-async fn publish_task(
-    State(api): ApiState,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    _body: axum::body::Bytes,
-) -> ApiResult<serde_json::Value> {
-    authed(&api, &headers)?;
-    api.db.task(&id).map_err(not_found)?;
-    let what = (api.hooks.publish_task)(id.clone()).await.map_err(bad)?;
-    let task = api.db.task(&id).map_err(bad)?;
-    Ok(Json(json!({ "did": what, "prUrl": task.pr_url, "prNumber": task.pr_number })))
 }
 
 // ---- scripts and groups --------------------------------------------------
@@ -654,6 +570,13 @@ fn resolve_project(api: &Api, needle: &str) -> Result<Project, (StatusCode, Stri
 
 fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
+}
+
+/// Deserializes a request body *after* the token check. Taking `Json<T>` as an
+/// extractor would make axum answer 422 to a request that had no business
+/// being parsed at all.
+fn parse_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, (StatusCode, String)> {
+    serde_json::from_slice(body).map_err(|e| (StatusCode::BAD_REQUEST, format!("bad request body: {e}")))
 }
 
 fn not_found(e: impl std::fmt::Display) -> (StatusCode, String) {

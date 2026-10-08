@@ -92,10 +92,6 @@ export interface Settings {
   keepTomlInSync: boolean;
   importMode: "merge" | "replace" | "preview";
   defaultShell: string;
-  /** lets an outside agent start agent runs over MCP — off by default */
-  mcpAgentControl: boolean;
-  /** after an isolated task succeeds, commit, push and open a PR */
-  publishOnSuccess: boolean;
 }
 
 export interface Snapshot {
@@ -176,118 +172,27 @@ export interface ProcStats {
 // change when worktrees (B), verification (C), the board (D) and the backlog (G) land.
 // ---------------------------------------------------------------------------
 
-export type TaskStatus =
-  | "backlog"
-  | "queued"
-  | "working"
-  | "verifying"
-  | "publishing"
-  | "review"
-  | "done"
-  | "failed"
-  | "cancelled";
+/** The board's columns, in order. */
+export type TaskStatus = "backlog" | "todo" | "doing" | "review" | "done";
 
-/** How much the agent may do without asking. Maps to per-adapter flags. */
-export type Autonomy = "ask" | "auto-edit" | "full";
-
-/**
- * How hard the model should think. Claude Code's own ladder, where "extra" is
- * its `xhigh` and "ultracode" is its multi-agent mode (a prompt keyword, not a
- * flag). Other agents map these onto their own switches, and can't express all
- * of them — see `AgentAdapter.effortArgs`.
- */
-export type Effort = "low" | "medium" | "high" | "extra" | "max" | "ultracode";
-
-export const EFFORTS: Effort[] = ["low", "medium", "high", "extra", "max", "ultracode"];
-
-/** Where the agent works. "worktree" lands in slice B. */
-export type WorkspaceMode = "in-place" | "worktree";
-
-/** Machine-readable progress format, when the CLI offers one. */
-export type AgentStream = "none" | "claude-json" | "opencode-json" | "cursor-json";
-
-/** A provider adapter: data, not code, so new CLIs need no Rust change. */
-export interface AgentAdapter {
-  id: string;
-  name: string;
-  /** executable looked up on PATH */
-  bin: string;
-  /** argv templates; placeholders: {prompt} {model} {session} */
-  interactiveArgs: string[];
-  headlessArgs: string[];
-  resumeArgs: string[];
-  modelArgs: string[];
-  /** extra argv per autonomy level */
-  autonomyArgs: Record<Autonomy, string[]>;
-  /** extra argv per effort level; empty array = this agent can't express it */
-  effortArgs: Record<Effort, string[]>;
-  /** levels opted into by prompt keyword instead of a flag */
-  effortPrompt: Partial<Record<Effort, string>>;
-  stream: AgentStream;
-  /** suggested models for the picker; free text is allowed too */
-  models: string[];
-  docsUrl: string | null;
-  source: "builtin" | "user" | "project";
-  /** resolved at load time */
-  available: boolean;
-  version: string | null;
-}
-
+/** A card on the board. */
 export interface Task {
   id: string;
   projectId: string;
   title: string;
-  /** the prompt handed to the agent */
+  /** Free text: why this card exists and what finishing it looks like. */
   goal: string;
-  agentId: string;
-  model: string | null;
-  autonomy: Autonomy;
-  /** null = the agent's own default */
-  effort: Effort | null;
-  workspace: WorkspaceMode;
-  /** the worktree's branch, once one has been cut */
-  branch: string | null;
-  /** branch the work is cut from, and later targeted by its PR */
-  baseBranch: string | null;
-  /** the pull request opened for this task's branch, once there is one */
-  prUrl: string | null;
-  prNumber: number | null;
-  /** later (D): task ids this task starts after — same scheduler as scripts */
+  /** Task ids this card is blocked by. */
   after: string[];
-  /** later (C): script ids that must pass for the task to count as done */
-  verify: string[];
   status: TaskStatus;
-  /** PM: 0 none · 1 low · 2 medium · 3 high */
+  /** 0 none · 1 low · 2 medium · 3 high */
   priority: number;
-  /** PM: "me" or "agent:<adapterId>" */
   assignee: string | null;
   labels: string[];
-  /** PM: linked GitHub/Linear issue */
   issueUrl: string | null;
-  budgetTokens: number | null;
-  budgetSeconds: number | null;
   createdAt: number;
   updatedAt: number;
   sortOrder: number;
-}
-
-/** One attempt at a task. Mirrors RunInfo, plus what agents report about themselves. */
-export interface TaskRun {
-  id: string;
-  taskId: string;
-  state: RunState;
-  pid: number | null;
-  startedAt: number | null;
-  endedAt: number | null;
-  exitCode: number | null;
-  /** agent session id, for resume and repair loops */
-  sessionId: string | null;
-  turns: number | null;
-  costUsd: number | null;
-  tokensIn: number | null;
-  tokensOut: number | null;
-  /** final assistant message / result text, when the stream format gives one */
-  summary: string | null;
 }
 
 /** Status of the loopback API that the scriptr-mcp bridge talks to. */
@@ -314,13 +219,3 @@ export interface ImportReport {
   preview: string | null;
 }
 
-/** A task's isolated checkout, from the `task_workspace` command. */
-export interface WorkspaceInfo {
-  path: string;
-  branch: string;
-  base: string;
-  /** commits on the task's branch the base does not have */
-  ahead: number;
-  /** files changed but not committed */
-  dirty: number;
-}

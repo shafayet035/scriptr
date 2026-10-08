@@ -2,11 +2,8 @@
 // every screen can be checked against the design without a Tauri window. Not shipped logic.
 import type { Backend, EventMap } from "./ipc";
 import { computePlan } from "./graph";
-import { taskKey } from "./terminals";
 import type {
-  AgentAdapter,
   Task,
-  TaskRun,
   DetectedScript,
   Group,
   GroupProgress,
@@ -86,92 +83,31 @@ export function createMockBackend(): Backend {
     { id: "g2", projectId: "p1", name: "Backend only", scriptIds: ["api", "worker"] },
   ];
 
-  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc", mcpAgentControl: false, publishOnSuccess: true };
+  let settings: Settings = { onQuit: "stop", keepTomlInSync: true, importMode: "merge", defaultShell: "/bin/zsh -lc" };
 
-  // ---- AI agents & tasks (docs/AI-PM.md slice A) ----
-  const agent = (
-    id: string,
-    name: string,
-    bin: string,
-    models: string[],
-    available: boolean,
-    version: string | null,
-    stream: AgentAdapter["stream"],
-  ): AgentAdapter => ({
-    id, name, bin, models, available, version, stream,
-    interactiveArgs: ["{prompt}"], headlessArgs: ["-p", "{prompt}"], resumeArgs: ["--resume", "{session}"],
-    modelArgs: ["--model", "{model}"],
-    autonomyArgs: { ask: [], "auto-edit": [], full: [] },
-    // Mirrors the real adapters: claude expresses every level (ultracode via a
-    // prompt keyword), opencode only some, gemini none.
-    effortArgs:
-      id === "claude-code"
-        ? { low: ["--effort", "low"], medium: ["--effort", "medium"], high: ["--effort", "high"],
-            extra: ["--effort", "xhigh"], max: ["--effort", "max"], ultracode: ["--effort", "max"] }
-        : id === "opencode"
-          ? { low: ["--variant", "minimal"], medium: [], high: ["--variant", "high"],
-              extra: ["--variant", "high"], max: ["--variant", "max"], ultracode: [] }
-          : { low: [], medium: [], high: [], extra: [], max: [], ultracode: [] },
-    effortPrompt: id === "claude-code" ? { ultracode: "ultracode" } : {},
-    docsUrl: null, source: "builtin",
-  });
-
-  const agents: AgentAdapter[] = [
-    agent("claude-code", "Claude Code", "claude", ["opus", "sonnet", "haiku"], true, "2.1.289", "claude-json"),
-    agent("opencode", "opencode", "opencode", ["anthropic/claude-opus-4", "openai/gpt-5"], true, "1.18.34", "opencode-json"),
-    agent("cursor-agent", "Cursor Agent", "cursor-agent", ["sonnet-4", "gpt-5"], true, "2026.09.1", "cursor-json"),
-    agent("gemini", "Gemini CLI", "gemini", ["gemini-3-pro"], true, "0.9.2", "none"),
-    agent("aider", "Aider", "aider", ["sonnet"], false, null, "none"),
-  ];
-
-  const mkTask = (p: Partial<Task> & Pick<Task, "id" | "projectId" | "title" | "goal" | "agentId">): Task => ({
-    model: null, autonomy: "ask", effort: null, workspace: "in-place", branch: null, baseBranch: null, prUrl: null, prNumber: null, after: [], verify: [], status: "backlog",
-    priority: 1, assignee: null, labels: [], issueUrl: null, budgetTokens: null, budgetSeconds: null,
+  // ---- board cards ----
+  const mkTask = (p: Partial<Task> & Pick<Task, "id" | "projectId" | "title">): Task => ({
+    goal: "", after: [], status: "backlog", priority: 1, assignee: null, labels: [], issueUrl: null,
     createdAt: t0 - 86_400_000, updatedAt: t0 - 3_600_000, sortOrder: 0, ...p,
   });
 
   const tasks: Task[] = [
-    mkTask({ id: "t1", projectId: "p1", title: "Rate-limit the checkout endpoint", agentId: "claude-code", model: "opus",
-      goal: "Add a token-bucket rate limiter to POST /api/v1/checkout: 10 requests per minute per account, 429 with Retry-After when exceeded. Cover it with tests.",
-      status: "review", autonomy: "auto-edit", priority: 3, assignee: "agent:claude-code", labels: ["billing"], sortOrder: 0 }),
-    mkTask({ id: "t2", projectId: "p1", title: "Fix the flaky webhook test", agentId: "opencode",
-      goal: "tests/test_webhooks.py::test_replay flakes in CI about 1 run in 5. Find the race and fix it.",
-      status: "backlog", priority: 2, labels: ["tests"], sortOrder: 1 }),
+    mkTask({ id: "t1", projectId: "p1", title: "Rate-limit the checkout endpoint",
+      goal: "10 requests per minute per account on POST /api/v1/checkout, 429 with Retry-After when exceeded.",
+      status: "review", priority: 3, assignee: "me", labels: ["billing"], sortOrder: 0 }),
+    mkTask({ id: "t2", projectId: "p1", title: "Fix the flaky webhook test",
+      goal: "tests/test_webhooks.py::test_replay flakes in CI about 1 run in 5.",
+      status: "doing", priority: 2, labels: ["tests"], sortOrder: 1 }),
+    mkTask({ id: "t3", projectId: "p1", title: "Document the billing routes",
+      status: "todo", priority: 1, after: ["t1"], labels: ["docs"], sortOrder: 2 }),
   ];
 
-  const taskRuns = new Map<string, TaskRun[]>();
-  const mkRun = (taskId: string, p: Partial<TaskRun> = {}): TaskRun => ({
-    id: uid("tr"), taskId, state: "idle", pid: null, startedAt: null, endedAt: null, exitCode: null,
-    sessionId: null, turns: null, costUsd: null, tokensIn: null, tokensOut: null, summary: null, ...p,
-  });
-  taskRuns.set("t1", [mkRun("t1", { state: "stopped", exitCode: 0, startedAt: t0 - 5_400_000, endedAt: t0 - 5_100_000,
-    sessionId: "ses_8f21", turns: 14, costUsd: 0.82, tokensIn: 48_300, tokensOut: 6_120,
-    summary: "Added TokenBucket middleware, wired it into the checkout view, 12 tests pass." })]);
-
   const taskOf = (id: string) => tasks.find((t) => t.id === id)!;
-  const latestRun = (id: string) => (taskRuns.get(id) ?? []).at(-1) ?? null;
-  const emitTask = (id: string) => emit("task:state", { task: structuredClone(taskOf(id)), run: structuredClone(latestRun(id)) });
+  const emitTask = (id: string) => emit("task:state", { task: structuredClone(taskOf(id)) });
   const setTask = (id: string, patch: Partial<Task>) => {
     Object.assign(taskOf(id), patch, { updatedAt: Date.now() });
     emitTask(id);
   };
-
-  const seedTaskOutput = () =>
-    write(taskKey("t1"),
-    scriptrLine(" claude-code · opus · auto-edit", true) +
-    line(`${col(32, "$")} claude "Rate-limit the checkout endpoint"`) +
-    line() +
-    line(`${col(35, "●")} Reading ${col(36, "api/acme/billing/views.py")}`) +
-    line(`${col(35, "●")} Reading ${col(36, "api/acme/settings/dev.py")}`) +
-    line(`${col(35, "●")} Edit ${col(36, "api/acme/billing/ratelimit.py")}  ${col(32, "+64")} ${col(31, "-0")}`) +
-    line(`${col(35, "●")} Edit ${col(36, "api/acme/billing/views.py")}  ${col(32, "+18")} ${col(31, "-2")}`) +
-    line(`${col(35, "●")} Bash ${dim("poetry run pytest tests/test_checkout.py -q")}`) +
-    line(dim("  ............  12 passed in 3.41s")) +
-    line() +
-    line("Added a token-bucket limiter (10/min per account) in billing/ratelimit.py and applied it to the") +
-    line("checkout view, returning 429 with Retry-After. 12 tests pass.") +
-    line() +
-    scriptrLine(" agent exited 0 after 4m 58s · 14 turns · $0.82", true));
 
   const idle = (scriptId: string): RunInfo => ({
     scriptId, state: "idle", pid: null, startedAt: null, endedAt: null, exitCode: null, attempt: 0, maxAttempts: 0,
@@ -277,7 +213,6 @@ export function createMockBackend(): Backend {
     line() +
     scriptrLine(" process exited with code 1 after 4m 12s") +
     scriptrLine(" restart policy: on-crash · attempt 2/5 · waiting 45s…", true));
-  seedTaskOutput();
 
   // ---- lifecycle simulation ----
   const timers = new Map<string, number[]>();
@@ -524,7 +459,6 @@ export function createMockBackend(): Backend {
       configPath: "/Users/you/Library/Application Support/scriptr/mcp.json",
       bin: "/Applications/Scriptr.app/Contents/MacOS/scriptr-mcp",
     }),
-    agentList: async () => structuredClone(agents),
     taskList: async (projectId) => structuredClone(tasks.filter((t) => t.projectId === projectId)),
     taskSave: async (task) => {
       const t: Task = { ...task, id: task.id || uid("t"), updatedAt: Date.now() };
@@ -534,83 +468,24 @@ export function createMockBackend(): Backend {
       return structuredClone(t);
     },
     taskDelete: async (taskId) => {
-      tasks.splice(tasks.findIndex((t) => t.id === taskId), 1);
-      taskRuns.delete(taskId);
+      tasks.splice(
+        tasks.findIndex((t) => t.id === taskId),
+        1,
+      );
+      // A deleted card stops blocking whatever it was blocking.
+      for (const t of tasks) t.after = t.after.filter((id) => id !== taskId);
     },
-    taskRuns: async (taskId) => structuredClone(taskRuns.get(taskId) ?? []),
-    projectBranches: async () => ["main", "staging", "develop"],
-    taskWorkspace: async (taskId) => {
-      const t = taskOf(taskId);
-      if (t.workspace !== "worktree" || !t.branch) return null;
-      return {
-        path: `/Users/you/Library/Application Support/scriptr/worktrees/${taskId}`,
-        branch: t.branch,
-        base: t.baseBranch ?? "main",
-        ahead: 2,
-        dirty: 3,
-      };
+    taskMove: async (taskId, status, before) => {
+      setTask(taskId, { status });
+      const card = taskOf(taskId);
+      const rest = tasks.filter((t) => t.id !== taskId);
+      const at = before ? rest.findIndex((t) => t.id === before) : -1;
+      rest.splice(at < 0 ? rest.length : at, 0, card);
+      rest.forEach((t, i) => (t.sortOrder = i));
+      tasks.length = 0;
+      tasks.push(...rest);
+      return structuredClone(tasks.filter((t) => t.projectId === card.projectId));
     },
-    taskWorkspaceDiscard: async () => {},
-    taskPublish: async (taskId) => {
-      const t = taskOf(taskId);
-      t.prUrl = `https://github.com/you/${t.projectId}/pull/42`;
-      t.prNumber = 42;
-      return `pushed ${t.branch} · ${t.prUrl}`;
-    },
-    taskStart: async (taskId) => {
-      const t = taskOf(taskId);
-      const a = agents.find((x) => x.id === t.agentId);
-      const key = taskKey(taskId);
-      const run = mkRun(taskId, { state: "starting", startedAt: Date.now(), pid: ++pid, sessionId: `ses_${Math.random().toString(16).slice(2, 6)}` });
-      taskRuns.set(taskId, [...(taskRuns.get(taskId) ?? []), run]);
-      setTask(taskId, { status: "queued" });
-      write(key, line() + scriptrLine(` ${a?.name ?? t.agentId}${t.model ? ` · ${t.model}` : ""} · ${t.autonomy}`, true) +
-        line(`${col(32, "$")} ${a?.bin ?? t.agentId} ${JSON.stringify(t.title)}`) + line());
-      later(key, 500, () => {
-        run.state = "running";
-        setTask(taskId, { status: "working" });
-      });
-      const steps = [
-        `${col(35, "●")} Reading ${col(36, "api/acme/billing/views.py")}`,
-        `${col(35, "●")} Reading ${col(36, "tests/test_webhooks.py")}`,
-        `${col(35, "●")} Edit ${col(36, "api/acme/billing/views.py")}  ${col(32, "+21")} ${col(31, "-4")}`,
-        `${col(35, "●")} Bash ${dim("poetry run pytest -q")}`,
-        dim("  ............  18 passed in 5.02s"),
-        "",
-        "Done — the race was a missing select_for_update on the replay lookup.",
-      ];
-      steps.forEach((s, i) => later(key, 1200 + i * 900, () => write(key, line(s))));
-      later(key, 1200 + steps.length * 900 + 400, () => {
-        run.state = "stopped";
-        run.endedAt = Date.now();
-        run.exitCode = 0;
-        run.turns = 9;
-        run.costUsd = 0.41;
-        run.tokensIn = 31_200;
-        run.tokensOut = 3_980;
-        run.summary = steps.at(-1)!;
-        write(key, scriptrLine(` agent exited 0 after ${Math.round((run.endedAt - run.startedAt!) / 1000)}s · 9 turns · $0.41`, true));
-        setTask(taskId, { status: "review" });
-      });
-    },
-    taskStop: async (taskId) => {
-      const key = taskKey(taskId);
-      clearTimers(key);
-      const run = latestRun(taskId);
-      if (run && !run.endedAt) {
-        run.state = "stopped";
-        run.endedAt = Date.now();
-      }
-      write(key, scriptrLine(" stopped by you", true));
-      setTask(taskId, { status: "cancelled" });
-    },
-    taskAttach: async (taskId, onData) => {
-      const key = taskKey(taskId);
-      sinks.set(key, onData);
-      onData(enc.encode(buffers.get(key) ?? ""));
-    },
-    taskWrite: async (taskId, data) => write(taskKey(taskId), data === "\r" ? "\r\n" : data),
-    taskResize: async () => {},
     runHistory: async (scriptId) => {
       const r = runs.get(scriptId);
       if (!r?.startedAt) return [];

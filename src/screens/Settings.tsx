@@ -227,10 +227,9 @@ function ImportExport() {
   );
 }
 
-/** How an outside coding agent files tasks into Scriptr. */
+/** How an AI client reads and drives Scriptr. */
 function Integrations() {
   const [info] = createResource(() => backend.mcpInfo().catch(() => null));
-  const set = (patch: Partial<Settings>) => void saveSettings({ ...state.settings, ...patch });
   const copy = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -249,7 +248,7 @@ function Integrations() {
 
       <Card
         title="MCP server"
-        body="Scriptr listens on a loopback port for a small bridge process. Tasks filed this way land in the backlog and never start an agent on their own."
+        body="Scriptr listens on a loopback port for a small bridge process, so an AI client can read the board, move cards and run your scripts."
       >
         <div class="settings-row">
           <span class="dot" data-task={info()?.running ? "running" : "crashed"} style={{ width: "7px", height: "7px" }} />
@@ -277,40 +276,17 @@ function Integrations() {
       </Card>
 
       <Card
-        title="What an outside agent may do"
-        body="Reading and running your own scripts is allowed. Spending tokens is not — that line is where the default sits."
+        title="What an AI client may do"
+        body="Reading is free, and so is running the scripts you configured yourself. Nothing here can delete or rewrite them."
       >
         <div class="col" style={{ gap: "4px" }}>
-          <p class="t-body-12 c-secondary">· Read projects, scripts, groups, tasks, run history and terminal output</p>
+          <p class="t-body-12 c-secondary">· Read projects, scripts, groups, cards and terminal output</p>
           <p class="t-body-12 c-secondary">· Start, stop and restart your scripts; bring a group up in order</p>
-          <p class="t-body-12 c-secondary">· File a task — it lands in Backlog, ask-first, labelled with its origin</p>
-          <p class="t-body-12 c-secondary">· Move, re-prioritise and retarget tasks it has filed</p>
+          <p class="t-body-12 c-secondary">· Add cards, edit them, and move them between columns</p>
           <p class="t-body-12 c-muted">· It cannot delete anything, edit your scripts, or change these settings</p>
         </div>
-        <button class="settings-row toggle-row" onClick={() => set({ publishOnSuccess: !state.settings.publishOnSuccess })}>
-          <span class="toggle" role="switch" aria-checked={state.settings.publishOnSuccess} />
-          <span class="col" style={{ gap: "2px", "text-align": "left" }}>
-            <span class="t-medium-12 c-primary">Open a pull request when a task succeeds</span>
-            <span class="t-caption-11 c-muted">
-              For tasks on their own branch only — Scriptr never commits in the checkout you have open. Commits what the
-              agent left, pushes the branch, and opens a PR against the task's base with gh.
-            </span>
-          </span>
-        </button>
-        <button
-          class="settings-row toggle-row"
-          onClick={() => set({ mcpAgentControl: !state.settings.mcpAgentControl })}
-        >
-          <span class="toggle" role="switch" aria-checked={state.settings.mcpAgentControl} />
-          <span class="col" style={{ gap: "2px", "text-align": "left" }}>
-            <span class="t-medium-12 c-primary">Let agents start runs</span>
-            <span class="t-caption-11 c-muted">
-              Off by default. A started run spends tokens and edits your code, and the point of a board is that you see
-              the work before it happens.
-            </span>
-          </span>
-        </button>
       </Card>
+
     </>
   );
 }

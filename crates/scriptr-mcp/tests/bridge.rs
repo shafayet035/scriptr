@@ -167,8 +167,8 @@ fn file_task_reaches_the_app_with_the_token() {
     assert_eq!(body["goal"], "test_replay flakes in CI");
 
     let text = tool_text(&reply);
-    assert!(text.contains("Filed"), "{text}");
-    assert!(text.contains("will not run"), "the model must be told it is not started: {text}");
+    assert!(text.contains("Added"), "{text}");
+    assert!(text.contains("backlog"), "the model should learn which column it landed in: {text}");
     assert_eq!(reply["result"]["isError"], false);
 }
 
@@ -215,19 +215,14 @@ fn the_handshake_and_tool_list_are_stable() {
     let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
     for want in [
         "file_task", "list_projects", "list_tasks", "scriptr_status", "get_task", "update_task",
-        "start_task", "stop_task", "publish_task", "list_scripts", "control_script", "run_group", "get_logs",
-        "list_groups",
+        "move_task", "list_scripts", "control_script", "run_group", "get_logs", "list_groups",
     ] {
         assert!(names.contains(&want), "{want} is missing from tools/list: {names:?}");
     }
-    // The one tool that spends money and edits code must be marked as such.
-    let start = tools["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["name"] == "start_task")
-        .expect("start_task");
-    assert_eq!(start["annotations"]["destructiveHint"], true);
+    // Nothing on the board surface is destructive: no tool deletes anything.
+    for tool in tools["result"]["tools"].as_array().unwrap() {
+        assert_ne!(tool["annotations"]["destructiveHint"], true, "{} claims to be destructive", tool["name"]);
+    }
     // Every tool needs a schema a model can fill in.
     for tool in tools["result"]["tools"].as_array().unwrap() {
         assert_eq!(tool["inputSchema"]["type"], "object", "{}", tool["name"]);
@@ -240,41 +235,38 @@ fn the_handshake_and_tool_list_are_stable() {
 
 #[test]
 fn a_refusal_reaches_the_model_with_its_reason() {
-    // The gate on start_task explains itself in the body; a bare status code
-    // would leave the model unable to tell the user what to do.
+    // A refusal's body is the only actionable part of it; a bare status code
+    // would leave the model unable to tell the user what went wrong.
     let home = Home::new("refused");
-    let (port, requests) = mock_scriptr_status(
-        "starting agent runs from outside is off — turn on \"Let agents start runs\" in Scriptr's Settings",
-        "403 Forbidden",
-    );
+    let (port, requests) = mock_scriptr_status("no project \"ghost\" in Scriptr — known: acme", "404 Not Found");
     home.write_config(port);
 
     let mut bridge = Bridge::start(&home);
     let reply = bridge.call(
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"start_task","arguments":{"taskId":"t1"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_tasks","arguments":{"project":"ghost"}}}"#,
     );
-    request_matching(&requests, "POST /v1/tasks/t1/start ");
+    request_matching(&requests, "GET /v1/tasks?project=ghost ");
 
     let text = tool_text(&reply);
     assert_eq!(reply["result"]["isError"], true, "{text}");
-    assert!(text.contains("Let agents start runs"), "the reason must survive the hop: {text}");
+    assert!(text.contains("known: acme"), "the reason must survive the hop: {text}");
 }
 
 #[test]
 fn update_task_sends_a_patch_with_only_the_fields_given() {
     let home = Home::new("patch");
-    let (port, requests) = mock_scriptr(r#"{"id":"t1","title":"Ship it","status":"queued","priority":3}"#);
+    let (port, requests) = mock_scriptr(r#"{"id":"t1","title":"Ship it","status":"todo","priority":3}"#);
     home.write_config(port);
 
     let mut bridge = Bridge::start(&home);
     let reply = bridge.call(
-        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"update_task","arguments":{"taskId":"t1","status":"queued","base":"staging"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"update_task","arguments":{"taskId":"t1","status":"todo","labels":["urgent"]}}}"#,
     );
 
     let raw = request_matching(&requests, "PATCH /v1/tasks/t1 ");
     let body: serde_json::Value = serde_json::from_str(raw.split_once("\r\n\r\n").expect("a body").1).unwrap();
-    assert_eq!(body["status"], "queued");
-    assert_eq!(body["base"], "staging");
+    assert_eq!(body["status"], "todo");
+    assert_eq!(body["labels"][0], "urgent");
     assert!(body.get("taskId").is_none(), "the id travels in the path, not the body: {body}");
     assert!(body.get("priority").is_none(), "an unset field must not be sent: {body}");
     assert_eq!(reply["result"]["isError"], false, "{}", tool_text(&reply));

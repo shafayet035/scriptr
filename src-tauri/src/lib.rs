@@ -1,7 +1,6 @@
 //! Scriptr core: runs a project's dev processes in real PTYs with dependency
 //! ordering, readiness gates and restart policies.
 
-pub mod agents;
 mod commands;
 pub mod config;
 pub mod db;
@@ -11,14 +10,11 @@ pub mod mcp_api;
 mod menu;
 pub mod model;
 pub mod pty;
-pub mod publish;
 pub mod scheduler;
 mod stats;
-pub mod stream;
 pub mod supervisor;
 pub mod tasks;
 mod watch;
-pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -28,10 +24,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
 use crate::db::Db;
-use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot, Task, TaskRun, TaskState};
+use crate::model::{GroupProgress, OnQuit, RunInfo, Snapshot, Task, TaskState};
 use crate::scheduler::Scheduler;
 use crate::supervisor::{EventSink, Supervisor};
-use crate::tasks::TaskRunner;
 use crate::watch::ProjectWatcher;
 
 /// Upper bound on how long quitting waits for processes to stop.
@@ -53,8 +48,8 @@ impl EventSink for TauriEvents {
         let _ = self.0.emit("group:progress", progress);
     }
 
-    fn task_changed(&self, task: &Task, run: Option<&TaskRun>) {
-        let _ = self.0.emit("task:state", TaskState { task: task.clone(), run: run.cloned() });
+    fn task_changed(&self, task: &Task) {
+        let _ = self.0.emit("task:state", TaskState { task: task.clone() });
     }
 }
 
@@ -69,7 +64,6 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub sup: Arc<Supervisor>,
     pub sched: Arc<Scheduler>,
-    pub tasks: Arc<TaskRunner>,
     watcher: Mutex<Option<ProjectWatcher>>,
     /// Set once the loopback MCP API is listening.
     pub mcp: Mutex<Option<mcp_api::McpInfo>>,
@@ -79,7 +73,7 @@ pub struct AppState {
 impl AppState {
     /// A task filed from outside has to reach the board without a reload.
     pub fn notify_task(&self, task: &Task) {
-        self.events.task_changed(task, None);
+        self.events.task_changed(task);
     }
 }
 
@@ -126,13 +120,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let db = Arc::new(Db::open(&db::default_path()?)?);
     let events: Arc<dyn EventSink> = Arc::new(TauriEvents(handle.clone()));
-    // Scripts and agent tasks share one terminal registry, so both stream
-    // through the same batching and ring buffers.
-    let terminals = Arc::<pty::Terminals>::default();
-    let sup = Supervisor::with_terminals(db.clone(), events.clone(), terminals.clone());
+    let sup = Supervisor::new(db.clone(), events.clone());
     let sched = Scheduler::new(db.clone(), sup.clone(), events.clone());
-
-    let tasks = TaskRunner::new(db.clone(), events.clone(), terminals);
     let events_for_state = events;
 
     let emitter = handle.clone();
@@ -146,7 +135,6 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         db,
         sup: sup.clone(),
         sched,
-        tasks,
         watcher: Mutex::new(watcher),
         mcp: Mutex::new(None),
         events: events_for_state,
@@ -189,12 +177,8 @@ fn stop_on_quit(app: &AppHandle) {
         return;
     }
     let sup = state.sup.clone();
-    let tasks = state.tasks.clone();
     tauri::async_runtime::block_on(async move {
-        let _ = tokio::time::timeout(QUIT_TIMEOUT, async {
-            tokio::join!(sup.stop_all(), tasks.stop_all());
-        })
-        .await;
+        let _ = tokio::time::timeout(QUIT_TIMEOUT, sup.stop_all()).await;
     });
 }
 
@@ -246,21 +230,11 @@ pub fn run() {
             commands::settings_set,
             commands::db_backup,
             commands::run_history,
-            commands::agent_list,
             commands::task_list,
             commands::task_save,
             commands::task_delete,
-            commands::task_start,
-            commands::task_stop,
-            commands::task_runs,
-            commands::task_attach,
-            commands::task_write,
-            commands::task_resize,
+            commands::task_move,
             commands::mcp_info,
-            commands::project_branches,
-            commands::task_workspace,
-            commands::task_workspace_discard,
-            commands::task_publish,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Scriptr application")

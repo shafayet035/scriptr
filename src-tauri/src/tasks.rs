@@ -1,115 +1,62 @@
-//! Task runner: an agent run is a PTY run like any other.
+//! Board tasks.
 //!
-//! ```text
-//! queued → working → review   (agent exited 0)
-//!                  → failed   (non-zero, or the budget ran out)
-//!                  → cancelled (you stopped it)
-//! ```
+//! A task is a card on a Kanban board: a title, free-text goal, a column, a
+//! priority, labels, and the tasks it is blocked by. Scriptr stores and shows
+//! them; the work of actually doing them happens elsewhere, usually in an AI
+//! client driving the board over MCP.
 //!
-//! A task either works in the project directory or, with
-//! `WorkspaceMode::Worktree`, in its own checkout on its own branch (B1 — see
-//! `docs/REVIEW-LOOP.md`). Scriptr still never commits or pushes, and the
-//! agent's own permission prompts are hosted in the PTY rather than bypassed.
+//! `create` is shared by the UI command and the MCP API so a card filed from
+//! outside gets exactly the same validation as one typed into the composer.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use crate::agents;
 use crate::db::Db;
-use crate::model::{now_ms, AgentAdapter, RunState, Task, TaskRun, TaskStatus, WorkspaceMode};
-use crate::pty::{self, DataSink, ProcessGroup, RunKey, SpawnSpec, Terminal, Terminals};
-use crate::stream::StreamParser;
-use crate::supervisor::{EventSink, STOP_GRACE};
-use crate::worktree;
+use crate::model::{now_ms, Task, TaskStatus};
 
-/// How long to wait for trailing output after the agent exits.
-const DRAIN_WAIT: Duration = Duration::from_millis(250);
-
-/// What a caller needs to supply to file a task. Shared by the UI command and
-/// the MCP API so an agent-filed task gets exactly the same validation.
+/// What a caller must supply to file a task.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NewTask {
     /// project id, name or path
     pub project: String,
     pub title: String,
+    #[serde(default)]
     pub goal: String,
     #[serde(default)]
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<crate::model::Effort>,
+    pub status: Option<TaskStatus>,
     #[serde(default)]
     pub priority: Option<i64>,
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
     pub issue_url: Option<String>,
-    /// "in-place" or "worktree". Omitted = the project's checkout.
-    #[serde(default)]
-    pub workspace: Option<crate::model::WorkspaceMode>,
-    /// Branch the work is cut from. Omitted = whatever the repo is on.
-    #[serde(default)]
-    pub base: Option<String>,
 }
 
-/// Creates a backlog task. `origin` records who filed it ("mcp", "mcp-offline").
-///
-/// Anything filed from outside lands in the backlog with ask-first autonomy: a
-/// goal written by another agent becomes a prompt for this one, so a human
-/// reads it before it runs.
+/// Creates a task. `origin` records who filed it ("mcp", "mcp-offline") and
+/// becomes a label, so the board shows where a card came from.
 pub fn create(db: &Db, project_id: &str, input: &NewTask, origin: &str) -> Result<Task, String> {
     let title = input.title.trim();
-    let goal = input.goal.trim();
     if title.is_empty() {
         return Err("a task needs a title".into());
     }
-    if goal.is_empty() {
-        return Err("a task needs a goal — it is the prompt the agent gets".into());
-    }
     db.project(project_id)?;
-    let agent_id = match &input.agent_id {
-        Some(id) => {
-            let mut all = agents::load(None);
-            all.iter().any(|a| &a.id == id).then(|| id.clone()).ok_or_else(|| {
-                format!("unknown agent \"{id}\" — known: {}", {
-                    all.sort_by(|a, b| a.id.cmp(&b.id));
-                    all.iter().map(|a| a.id.as_str()).collect::<Vec<_>>().join(", ")
-                })
-            })?
-        }
-        None => "claude-code".to_string(),
-    };
-    let now = now_ms();
+
     let mut labels = input.labels.clone();
-    labels.push(origin.to_string());
+    if !origin.is_empty() && !labels.iter().any(|l| l == origin) {
+        labels.push(origin.to_string());
+    }
+    let now = now_ms();
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
         project_id: project_id.to_string(),
         title: title.to_string(),
-        goal: goal.to_string(),
-        agent_id,
-        model: input.model.clone(),
-        autonomy: crate::model::Autonomy::Ask,
-        effort: input.effort,
-        workspace: input.workspace.unwrap_or(WorkspaceMode::InPlace),
-        branch: None,
-        base_branch: input.base.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(str::to_string),
-        pr_url: None,
-        pr_number: None,
+        goal: input.goal.trim().to_string(),
         after: vec![],
-        verify: vec![],
-        status: TaskStatus::Backlog,
+        status: input.status.unwrap_or(TaskStatus::Backlog),
         priority: input.priority.unwrap_or(1).clamp(0, 3),
-        assignee: None,
+        assignee: input.assignee.clone(),
         labels,
         issue_url: input.issue_url.clone(),
-        budget_tokens: None,
-        budget_seconds: None,
         created_at: now,
         updated_at: now,
         sort_order: db.project_tasks(project_id).map(|t| t.len() as i64).unwrap_or(0),
@@ -118,403 +65,147 @@ pub fn create(db: &Db, project_id: &str, input: &NewTask, origin: &str) -> Resul
     Ok(task)
 }
 
-fn notice(msg: &str) -> Vec<u8> {
-    format!("\r\n\x1b[35m[scriptr]\x1b[0m {msg}\r\n").into_bytes()
+/// Moves a card to a column and to a position within it, which is what a
+/// drag-and-drop ends in. Order is `sort_order` across the project, so a move
+/// renumbers the cards that shifted and leaves the rest alone.
+///
+/// Returns the project's tasks in their new order.
+pub fn move_task(db: &Db, task_id: &str, status: TaskStatus, before: Option<&str>) -> Result<Vec<Task>, String> {
+    let mut task = db.task(task_id)?;
+    if before == Some(task_id) {
+        return Err("a card cannot be placed before itself".into());
+    }
+    let project_id = task.project_id.clone();
+    task.status = status;
+    task.updated_at = now_ms();
+    db.upsert_task(&task)?;
+
+    let mut rest: Vec<Task> = db.project_tasks(&project_id)?.into_iter().filter(|t| t.id != task_id).collect();
+    let at = match before {
+        Some(id) => rest.iter().position(|t| t.id == id).ok_or_else(|| format!("no task {id} to place this before"))?,
+        None => rest.len(),
+    };
+    rest.insert(at, task);
+    for (i, t) in rest.iter_mut().enumerate() {
+        if t.sort_order != i as i64 {
+            t.sort_order = i as i64;
+            db.upsert_task(t)?;
+        }
+    }
+    Ok(rest)
 }
 
-struct Live {
-    group: Arc<ProcessGroup>,
-    /// Set when the stop came from the user, so the exit maps to `cancelled`.
-    stopping: Arc<AtomicBool>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Project;
 
-pub struct TaskRunner {
-    db: Arc<Db>,
-    events: Arc<dyn EventSink>,
-    terminals: Arc<Terminals>,
-    live: Mutex<HashMap<String, Live>>,
-}
-
-impl TaskRunner {
-    /// Shares the supervisor's terminal registry so script and agent output
-    /// travel the same batching and ring-buffer path.
-    pub fn new(db: Arc<Db>, events: Arc<dyn EventSink>, terminals: Arc<Terminals>) -> Arc<Self> {
-        Arc::new(Self { db, events, terminals, live: Mutex::default() })
-    }
-
-    pub fn terminal(&self, task_id: &str) -> Arc<Terminal> {
-        self.terminals.get(&RunKey::task(task_id))
-    }
-
-    /// Replaces the task's output sink; the ring buffer snapshot goes first.
-    pub fn attach(&self, task_id: &str, sink: DataSink) {
-        self.terminal(task_id).attach(sink);
-    }
-
-    pub fn write_input(&self, task_id: &str, data: &[u8]) -> Result<(), String> {
-        match self.terminal(task_id).io() {
-            Some(io) => io.write(data),
-            None => Err("this task has no agent running".into()),
-        }
-    }
-
-    pub fn resize(&self, task_id: &str, cols: u16, rows: u16) -> Result<(), String> {
-        self.terminal(task_id).resize(cols, rows)
-    }
-
-    pub fn is_running(&self, task_id: &str) -> bool {
-        crate::lock(&self.live).contains_key(task_id)
-    }
-
-    /// `(task_id, pid)` for every live agent.
-    pub fn live_pids(&self) -> Vec<(String, u32)> {
-        crate::lock(&self.live).iter().map(|(id, l)| (id.clone(), l.group.pid())).collect()
-    }
-
-    fn emit(&self, task: &Task, run: Option<&TaskRun>) {
-        self.events.task_changed(task, run);
-    }
-
-    /// Persists both halves of the state and emits `task:state`.
-    fn save(&self, task: &mut Task, run: &TaskRun) {
-        task.updated_at = now_ms();
-        if let Err(e) = self.db.upsert_task(task) {
-            log::warn!("task {}: {e}", task.id);
-        }
-        if let Err(e) = self.db.upsert_task_run(run) {
-            log::warn!("task run {}: {e}", run.id);
-        }
-        self.emit(task, Some(run));
-    }
-
-    /// Looks up the adapter and checks it can actually run.
-    async fn adapter_for(&self, task: &Task, project_path: &std::path::Path) -> Result<AgentAdapter, String> {
-        let mut all = agents::load(Some(project_path));
-        agents::resolve(&mut all).await;
-        let adapter = agents::find(all, &task.agent_id)?;
-        if !adapter.available {
-            let hint = adapter.docs_url.as_deref().unwrap_or("");
-            return Err(format!(
-                "{} is not installed — `{}` was not found on PATH{}{hint}",
-                adapter.name,
-                adapter.bin,
-                if hint.is_empty() { "" } else { ". See " },
-            ));
-        }
-        Ok(adapter)
-    }
-
-    /// Starts the agent for `task_id`. Returns once the process is spawned;
-    /// the run itself is supervised by a tokio task.
-    pub async fn start(self: &Arc<Self>, task_id: &str) -> Result<(), String> {
-        let mut task = self.db.task(task_id)?;
-        if self.is_running(task_id) {
-            return Err(format!("“{}” is already running", task.title));
-        }
-        let project = self.db.project(&task.project_id)?;
-        let repo = PathBuf::from(&project.path);
-        if !repo.is_dir() {
-            return Err(format!("{} no longer exists", project.path));
-        }
-        // An isolated task works on its own branch in its own checkout, so two
-        // agents never share a tree and neither disturbs the one you have open.
-        let cwd = match task.workspace {
-            WorkspaceMode::InPlace => repo.clone(),
-            WorkspaceMode::Worktree => {
-                let (id, title, base) = (task.id.clone(), task.title.clone(), task.base_branch.clone());
-                let dir = repo.clone();
-                let wt = tokio::task::spawn_blocking(move || {
-                    worktree::ensure(&dir, &id, &title, base.as_deref())
-                })
-                .await
-                .map_err(|e| format!("worktree setup panicked: {e}"))??;
-                // Record the branch before anything runs: if the agent crashes,
-                // the work is still findable.
-                if task.branch.as_deref() != Some(wt.branch.as_str()) {
-                    task.branch = Some(wt.branch.clone());
-                    task.updated_at = now_ms();
-                    let _ = self.db.upsert_task(&task);
-                }
-                let terminal = self.terminal(task_id);
-                terminal.write(&notice(&format!(
-                    "{} {} · {}",
-                    if wt.created { "worktree" } else { "reusing worktree" },
-                    wt.branch,
-                    wt.path.display(),
-                )));
-                if wt.created {
-                    terminal.write(&notice(
-                        "a fresh checkout has no node_modules, .venv or .env —                          install dependencies in the goal if the agent needs them",
-                    ));
-                }
-                wt.path
-            }
-        };
-        let adapter = self.adapter_for(&task, &cwd).await?;
-
-        // Some levels are a prompt keyword rather than a flag (ultracode).
-        let goal = match agents::effort_prompt(&adapter, task.effort) {
-            Some(extra) => format!("{}\n\n{extra}", task.goal),
-            None => task.goal.clone(),
-        };
-        let vars = agents::Vars { prompt: &goal, model: task.model.as_deref(), session: None };
-        let args = agents::argv(&adapter, &vars, task.autonomy, task.effort, false)?;
-        let program = agents::resolve_bin(&adapter.bin)
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| adapter.bin.clone());
-
-        let mut run = TaskRun::queued(uuid::Uuid::new_v4().to_string(), task_id);
-        task.status = TaskStatus::Queued;
-        self.save(&mut task, &run);
-
-        let terminal = self.terminal(task_id);
-        terminal.write(&notice(&format!(
-            "{}{}{} · {}",
-            adapter.name,
-            task.model.as_deref().map(|m| format!(" · {m}")).unwrap_or_default(),
-            task.effort.map(|e| format!(" · {} effort", e.as_str())).unwrap_or_default(),
-            task.autonomy.as_str(),
-        )));
-        terminal.write(format!("\x1b[32m$\x1b[0m {} {}\r\n", adapter.bin, args.join(" ")).as_bytes());
-
-        let parser = Arc::new(Mutex::new(StreamParser::new(adapter.stream)));
-        let feed = parser.clone();
-        let sink = terminal.clone();
-        let spec = SpawnSpec {
-            program,
-            args,
-            cwd,
-            env: vec![
-                ("TERM".into(), "xterm-256color".into()),
-                ("COLORTERM".into(), "truecolor".into()),
-                ("FORCE_COLOR".into(), "1".into()),
-            ],
-            size: terminal.size(),
-        };
-
-        let spawned = pty::spawn(spec, move |batch| {
-            sink.write(batch);
-            // Harvesting cost/session must never alter the bytes the terminal
-            // renders, so the parser only ever sees a copy.
-            crate::lock(&feed).feed(batch);
-        });
-        let mut spawned = match spawned {
-            Ok(s) => s,
-            Err(e) => {
-                terminal.write(&notice(&format!("failed to start: {e}")));
-                run.state = RunState::Crashed;
-                run.ended_at = Some(now_ms());
-                task.status = TaskStatus::Failed;
-                self.save(&mut task, &run);
-                return Err(e);
-            }
-        };
-
-        let group = Arc::new(spawned.group);
-        let stopping = Arc::new(AtomicBool::new(false));
-        crate::lock(&self.live)
-            .insert(task_id.to_string(), Live { group: group.clone(), stopping: stopping.clone() });
-
-        terminal.set_io(Some(spawned.io.clone()));
-        run.state = RunState::Running;
-        run.pid = Some(group.pid());
-        run.started_at = Some(now_ms());
-        task.status = TaskStatus::Working;
-        self.save(&mut task, &run);
-
-        let this = self.clone();
-        let id = task_id.to_string();
-        let budget = task.budget_seconds.filter(|s| *s > 0).map(|s| Duration::from_secs(s as u64));
-        tokio::spawn(async move {
-            let mut over_budget = false;
-            let code = match budget {
-                Some(limit) => match tokio::time::timeout(limit, &mut spawned.exited).await {
-                    Ok(code) => code.unwrap_or(None),
-                    Err(_) => {
-                        over_budget = true;
-                        this.terminal(&id)
-                            .write(&notice(&format!("budget of {}s reached — stopping the agent", limit.as_secs())));
-                        this.halt(&group).await;
-                        (&mut spawned.exited).await.unwrap_or(None)
-                    }
-                },
-                None => (&mut spawned.exited).await.unwrap_or(None),
-            };
-            // Let the reader drain whatever the agent printed on its way out.
-            let _ = tokio::time::timeout(DRAIN_WAIT, spawned.drained).await;
-            let harvest = {
-                let mut p = crate::lock(&parser);
-                p.finish();
-                p.harvest()
-            };
-            this.finish(&id, code, stopping.load(Ordering::SeqCst), over_budget, harvest).await;
-        });
-        Ok(())
-    }
-
-    /// SIGTERM to the process group, then SIGKILL after the grace period.
-    async fn halt(&self, group: &ProcessGroup) {
-        group.terminate();
-        let deadline = tokio::time::Instant::now() + STOP_GRACE;
-        while group.alive() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        if group.alive() {
-            group.kill();
-        }
-    }
-
-    /// Stops a running agent; the run task maps the exit to `cancelled`.
-    pub async fn stop(&self, task_id: &str) -> Result<(), String> {
-        let live = crate::lock(&self.live).get(task_id).map(|l| {
-            l.stopping.store(true, Ordering::SeqCst);
-            l.group.clone()
-        });
-        match live {
-            Some(group) => {
-                self.halt(&group).await;
-                Ok(())
-            }
-            None => Err("this task has no agent running".into()),
-        }
-    }
-
-    pub async fn stop_all(&self) {
-        let ids: Vec<String> = crate::lock(&self.live).keys().cloned().collect();
-        for id in ids {
-            let _ = self.stop(&id).await;
-        }
-    }
-
-    /// Whether a successful run of this task would publish itself.
-    fn will_publish(&self, task: &Task) -> bool {
-        task.workspace == WorkspaceMode::Worktree
-            && self.db.settings().map(|s| s.publish_on_success).unwrap_or(true)
-    }
-
-    /// Commits, pushes and opens a PR for an isolated task that just succeeded.
-    ///
-    /// Never fails the task: the agent's work is already on a branch, so the
-    /// worst outcome is a notice explaining which step did not happen and a
-    /// `Publish` action to retry. Only ever touches a worktree task — Scriptr
-    /// does not commit in the checkout you have open.
-    pub async fn publish(&self, task: &mut Task) {
-        if !self.will_publish(task) {
-            return;
-        }
-        match self.publish_now(task).await {
-            Ok(summary) => self.terminal(&task.id).write(&notice(&summary)),
-            Err(e) => self.terminal(&task.id).write(&notice(&format!("not published: {e}"))),
-        }
-    }
-
-    /// The publish itself, without the status handling. Public so a manual
-    /// retry reports its error to the user instead of only to the terminal.
-    pub async fn publish_now(&self, task: &mut Task) -> Result<String, String> {
-        if task.workspace != WorkspaceMode::Worktree {
-            return Err("only a task with its own branch can be published".into());
-        }
-        let path = crate::worktree::path_for(&task.id)?;
-        if !path.join(".git").exists() {
-            return Err("this task has no workspace — run it first".into());
-        }
-        let branch = task
-            .branch
-            .clone()
-            .ok_or("this task has no branch yet — run it first")?;
-        let project = self.db.project(&task.project_id)?;
-        let base = match task.base_branch.clone() {
-            Some(b) => b,
-            None => crate::worktree::current_branch(&PathBuf::from(&project.path))?,
-        };
-
-        let (title, goal) = (task.title.clone(), task.goal.clone());
-        let (p, b, bs) = (path.clone(), branch.clone(), base.clone());
-        let done = tokio::task::spawn_blocking(move || {
-            crate::publish::publish(&p, &b, &bs, &title, &goal, false)
+    fn seeded() -> Db {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_project(&Project {
+            id: "p".into(),
+            name: "p".into(),
+            path: "/tmp".into(),
+            branch: None,
+            sort_order: 0,
         })
-        .await
-        .map_err(|e| format!("publishing panicked: {e}"))??;
-
-        if let Some(pr) = &done.pr {
-            task.pr_url = Some(pr.url.clone());
-            task.pr_number = Some(pr.number);
-        }
-        task.updated_at = now_ms();
-        let _ = self.db.upsert_task(task);
-        self.emit(task, None);
-
-        let mut out = String::new();
-        if done.committed.is_some() {
-            out += "committed the agent's work · ";
-        }
-        out += &format!("pushed {branch}");
-        match (&done.pr, &done.pr_note) {
-            (Some(pr), _) => out += &format!(" · {}", pr.url),
-            (None, Some(note)) => out += &format!(" · {note}"),
-            (None, None) => {}
-        }
-        Ok(out)
+        .unwrap();
+        db
     }
 
-    /// Records the outcome: exit 0 wants a human (`review`), anything else failed.
-    async fn finish(
-        &self,
-        task_id: &str,
-        code: Option<i32>,
-        cancelled: bool,
-        over_budget: bool,
-        harvest: crate::stream::Harvest,
-    ) {
-        crate::lock(&self.live).remove(task_id);
-        self.terminal(task_id).set_io(None);
+    fn input(title: &str) -> NewTask {
+        NewTask {
+            project: "p".into(),
+            title: title.into(),
+            goal: String::new(),
+            status: None,
+            priority: None,
+            labels: vec![],
+            assignee: None,
+            issue_url: None,
+        }
+    }
 
-        let Ok(mut task) = self.db.task(task_id) else { return };
-        let mut run = match self.db.task_runs(task_id).map(|r| r.into_iter().next_back()) {
-            Ok(Some(r)) => r,
-            _ => return,
-        };
-        harvest.apply(&mut run);
-        run.ended_at = Some(now_ms());
-        run.exit_code = code;
-        run.pid = None;
-        run.state = if code == Some(0) { RunState::Stopped } else { RunState::Crashed };
+    #[test]
+    fn a_card_needs_a_title_but_not_a_goal() {
+        let db = seeded();
+        // A goal is optional: half the cards on a real board are just a title.
+        let t = create(&db, "p", &input("Ship the thing"), "").unwrap();
+        assert_eq!(t.goal, "");
+        assert_eq!(t.status, TaskStatus::Backlog);
+        assert_eq!(t.priority, 1);
 
-        let elapsed = run
-            .started_at
-            .map(|s| crate::supervisor::fmt_ms((run.ended_at.unwrap_or(s) - s).max(0) as u64))
-            .unwrap_or_default();
-        let summary = run
-            .turns
-            .map(|t| format!(" · {t} turns"))
-            .unwrap_or_default()
-            + &run.cost_usd.map(|c| format!(" · ${c:.2}")).unwrap_or_default();
+        for bad in ["", "   "] {
+            assert!(create(&db, "p", &input(bad), "").is_err(), "{bad:?} should be refused");
+        }
+        assert_eq!(db.project_tasks("p").unwrap().len(), 1);
+    }
 
-        task.status = if cancelled {
-            self.terminal(task_id).write(&notice(&format!("stopped by you after {elapsed}{summary}")));
-            TaskStatus::Cancelled
-        } else if over_budget {
-            TaskStatus::Failed
-        } else if code == Some(0) {
-            let publishing = self.will_publish(&task);
-            self.terminal(task_id).write(&notice(&format!(
-                "agent exited 0 after {elapsed}{summary}{}",
-                if publishing { "" } else { " · ready for review" }
-            )));
-            // The work is done either way; publishing only decides whether the
-            // human reviews a PR or a branch. Show it while it happens: a push
-            // over a slow link is otherwise a card sitting in Working.
-            if publishing {
-                task.status = TaskStatus::Publishing;
-                self.save(&mut task, &run);
-                self.publish(&mut task).await;
-            }
-            TaskStatus::Review
-        } else {
-            let what = code.map_or_else(|| "was killed".into(), |c| format!("exited {c}"));
-            self.terminal(task_id).write(&notice(&format!("agent {what} after {elapsed}{summary}")));
-            TaskStatus::Failed
-        };
-        self.save(&mut task, &run);
+    #[test]
+    fn the_origin_becomes_a_label_once() {
+        let db = seeded();
+        let t = create(&db, "p", &input("From Claude"), "mcp").unwrap();
+        assert_eq!(t.labels, vec!["mcp".to_string()]);
+
+        let mut again = input("Also from Claude");
+        again.labels = vec!["mcp".into(), "bug".into()];
+        let t = create(&db, "p", &again, "mcp").unwrap();
+        assert_eq!(t.labels, vec!["mcp".to_string(), "bug".to_string()], "no duplicate origin label");
+    }
+
+    #[test]
+    fn priority_is_clamped_and_cards_keep_their_filing_order() {
+        let db = seeded();
+        let mut hot = input("Urgent");
+        hot.priority = Some(99);
+        assert_eq!(create(&db, "p", &hot, "").unwrap().priority, 3);
+        let mut cold = input("Whenever");
+        cold.priority = Some(-4);
+        assert_eq!(create(&db, "p", &cold, "").unwrap().priority, 0);
+
+        let order: Vec<i64> = db.project_tasks("p").unwrap().iter().map(|t| t.sort_order).collect();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_card_can_be_filed_straight_into_a_column() {
+        let db = seeded();
+        let mut ready = input("Already groomed");
+        ready.status = Some(TaskStatus::Todo);
+        assert_eq!(create(&db, "p", &ready, "mcp").unwrap().status, TaskStatus::Todo);
+    }
+
+    #[test]
+    fn moving_a_card_sets_its_column_and_renumbers_the_rest() {
+        let db = seeded();
+        let a = create(&db, "p", &input("A"), "").unwrap();
+        let b = create(&db, "p", &input("B"), "").unwrap();
+        let c = create(&db, "p", &input("C"), "").unwrap();
+
+        // C to the front of Doing: the column changes and the order follows.
+        let order = move_task(&db, &c.id, TaskStatus::Doing, Some(&a.id)).unwrap();
+        assert_eq!(order.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["C", "A", "B"]);
+        assert_eq!(order.iter().map(|t| t.sort_order).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(db.task(&c.id).unwrap().status, TaskStatus::Doing);
+        // …and it survives a reload, rather than living in the UI only.
+        let reloaded = db.project_tasks("p").unwrap();
+        assert_eq!(reloaded.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["C", "A", "B"]);
+
+        // No `before` means last.
+        let order = move_task(&db, &c.id, TaskStatus::Done, None).unwrap();
+        assert_eq!(order.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["A", "B", "C"]);
+
+        // Nonsense is refused rather than silently dropping the card.
+        assert!(move_task(&db, &a.id, TaskStatus::Todo, Some("ghost")).is_err());
+        assert!(move_task(&db, &a.id, TaskStatus::Todo, Some(&a.id)).is_err());
+        assert_eq!(db.project_tasks("p").unwrap().len(), 3);
+        let _ = b;
+    }
+
+    #[test]
+    fn an_unknown_project_is_refused_before_anything_is_written() {
+        let db = seeded();
+        assert!(create(&db, "nope", &input("Orphan"), "").is_err());
+        assert!(db.project_tasks("p").unwrap().is_empty());
     }
 }

@@ -189,21 +189,6 @@ pub struct Settings {
     pub keep_toml_in_sync: bool,
     pub import_mode: ImportMode,
     pub default_shell: String,
-    /// Lets an outside agent *start* agent runs over MCP. Off by default: a
-    /// started run spends tokens and edits code, and the point of filing to a
-    /// board is that a human sees it first. Reading, filing and script control
-    /// never need it.
-    #[serde(default)]
-    pub mcp_agent_control: bool,
-    /// After an isolated task's agent exits 0, commit, push and open a PR.
-    /// Only ever applies to worktree tasks: Scriptr never commits in the
-    /// checkout you have open.
-    #[serde(default = "yes")]
-    pub publish_on_success: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 impl Default for Settings {
@@ -213,8 +198,6 @@ impl Default for Settings {
             keep_toml_in_sync: false,
             import_mode: ImportMode::Merge,
             default_shell: default_shell(),
-            mcp_agent_control: false,
-            publish_on_success: true,
         }
     }
 }
@@ -341,133 +324,18 @@ pub struct HistoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// AI tasks (docs/AI-PM.md). Slice A: an agent run is a run like any other.
-// Mirrors the `AgentAdapter` / `Task` / `TaskRun` block of `src/lib/types.ts`.
-// String unions with dashes ("auto-edit", "in-place", "claude-json") are
-// kebab-case, the rest camelCase.
+// Board tasks. A task is a card: what to do, which column it holds, and what
+// blocks it. Mirrors the `Task` block of `src/lib/types.ts`.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TaskStatus {
     Backlog,
-    Queued,
-    Working,
-    Verifying,
-    /// Committing, pushing and opening the PR.
-    Publishing,
+    Todo,
+    Doing,
     Review,
     Done,
-    Failed,
-    Cancelled,
-}
-
-/// How much the agent may do without asking. Maps to per-adapter flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Autonomy {
-    Ask,
-    AutoEdit,
-    Full,
-}
-
-impl Autonomy {
-    pub const ALL: [Autonomy; 3] = [Autonomy::Ask, Autonomy::AutoEdit, Autonomy::Full];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Autonomy::Ask => "ask",
-            Autonomy::AutoEdit => "auto-edit",
-            Autonomy::Full => "full",
-        }
-    }
-}
-
-/// How hard the model should think. Mapped to per-adapter flags; `None` means
-/// "whatever the agent does by default".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Effort {
-    Low,
-    Medium,
-    High,
-    Extra,
-    Max,
-    Ultracode,
-}
-
-impl Effort {
-    pub const ALL: [Effort; 6] =
-        [Effort::Low, Effort::Medium, Effort::High, Effort::Extra, Effort::Max, Effort::Ultracode];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Effort::Low => "low",
-            Effort::Medium => "medium",
-            Effort::High => "high",
-            Effort::Extra => "extra",
-            Effort::Max => "max",
-            Effort::Ultracode => "ultracode",
-        }
-    }
-}
-
-/// Where the agent works. `Worktree` lands in slice B.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WorkspaceMode {
-    InPlace,
-    Worktree,
-}
-
-/// Machine-readable progress format, when the CLI offers one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AgentStream {
-    #[default]
-    None,
-    ClaudeJson,
-    OpencodeJson,
-    CursorJson,
-}
-
-/// Where an adapter came from; later sources win on id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum AgentSource {
-    Builtin,
-    User,
-    Project,
-}
-
-/// A provider adapter: data, not code, so new CLIs need no Rust change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAdapter {
-    pub id: String,
-    pub name: String,
-    /// Executable looked up on PATH.
-    pub bin: String,
-    /// argv templates; placeholders: {prompt} {model} {session}
-    pub interactive_args: Vec<String>,
-    pub headless_args: Vec<String>,
-    pub resume_args: Vec<String>,
-    pub model_args: Vec<String>,
-    /// Extra argv per autonomy level; every level is present.
-    pub autonomy_args: BTreeMap<Autonomy, Vec<String>>,
-    /// Extra argv per effort level. Every level is present; an empty list means
-    /// this agent cannot express that level, and the picker greys it out.
-    pub effort_args: BTreeMap<Effort, Vec<String>>,
-    /// Text appended to the prompt for a level, for CLIs whose mode is
-    /// keyword-triggered rather than a flag (Claude Code's ultracode).
-    pub effort_prompt: BTreeMap<Effort, String>,
-    pub stream: AgentStream,
-    pub models: Vec<String>,
-    pub docs_url: Option<String>,
-    pub source: AgentSource,
-    /// Resolved at load time.
-    pub available: bool,
-    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,81 +344,19 @@ pub struct Task {
     pub id: String,
     pub project_id: String,
     pub title: String,
-    /// The prompt handed to the agent.
+    /// Free text: why this card exists, and what finishing it looks like.
     pub goal: String,
-    pub agent_id: String,
-    pub model: Option<String>,
-    pub autonomy: Autonomy,
-    /// `None` = the agent's own default.
-    #[serde(default)]
-    pub effort: Option<Effort>,
-    pub workspace: WorkspaceMode,
-    /// the worktree's branch, once one has been cut
-    pub branch: Option<String>,
-    /// branch the work is cut from, and later targeted by its PR.
-    /// None = the repository's current branch when the task starts.
-    pub base_branch: Option<String>,
-    /// the pull request opened for this task's branch, once there is one
-    pub pr_url: Option<String>,
-    pub pr_number: Option<i64>,
-    /// later (D): task ids this task starts after
+    /// Task ids this one is blocked by.
     pub after: Vec<String>,
-    /// later (C): script ids that must pass for the task to count as done
-    pub verify: Vec<String>,
     pub status: TaskStatus,
     /// 0 none · 1 low · 2 medium · 3 high
     pub priority: i64,
-    /// "me" or "agent:<adapterId>"
     pub assignee: Option<String>,
     pub labels: Vec<String>,
     pub issue_url: Option<String>,
-    pub budget_tokens: Option<i64>,
-    pub budget_seconds: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub sort_order: i64,
-}
-
-/// One attempt at a task. Mirrors `RunInfo`, plus what agents report about
-/// themselves.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskRun {
-    pub id: String,
-    pub task_id: String,
-    pub state: RunState,
-    pub pid: Option<u32>,
-    pub started_at: Option<i64>,
-    pub ended_at: Option<i64>,
-    pub exit_code: Option<i32>,
-    /// Agent session id, for resume and repair loops.
-    pub session_id: Option<String>,
-    pub turns: Option<i64>,
-    pub cost_usd: Option<f64>,
-    pub tokens_in: Option<i64>,
-    pub tokens_out: Option<i64>,
-    /// Final assistant message / result text, when the stream format gives one.
-    pub summary: Option<String>,
-}
-
-impl TaskRun {
-    pub fn queued(id: String, task_id: &str) -> Self {
-        Self {
-            id,
-            task_id: task_id.to_string(),
-            state: RunState::Queued,
-            pid: None,
-            started_at: None,
-            ended_at: None,
-            exit_code: None,
-            session_id: None,
-            turns: None,
-            cost_usd: None,
-            tokens_in: None,
-            tokens_out: None,
-            summary: None,
-        }
-    }
 }
 
 /// Payload of the `task:state` event.
@@ -558,7 +364,6 @@ impl TaskRun {
 #[serde(rename_all = "camelCase")]
 pub struct TaskState {
     pub task: Task,
-    pub run: Option<TaskRun>,
 }
 
 /// Epoch milliseconds.
@@ -583,20 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn task_enum_serde_shapes() {
-        // Dashed string unions in types.ts must not become camelCase.
-        assert_eq!(serde_json::to_string(&Autonomy::AutoEdit).unwrap(), r#""auto-edit""#);
-        assert_eq!(serde_json::to_string(&WorkspaceMode::InPlace).unwrap(), r#""in-place""#);
-        assert_eq!(serde_json::to_string(&AgentStream::ClaudeJson).unwrap(), r#""claude-json""#);
-        assert_eq!(serde_json::to_string(&TaskStatus::Review).unwrap(), r#""review""#);
-        assert_eq!(serde_json::to_string(&AgentSource::Builtin).unwrap(), r#""builtin""#);
-        // autonomyArgs is a Record<Autonomy, string[]> keyed by those strings.
-        let args: BTreeMap<Autonomy, Vec<String>> =
-            Autonomy::ALL.into_iter().map(|a| (a, vec![a.as_str().to_string()])).collect();
-        assert_eq!(
-            serde_json::to_string(&args).unwrap(),
-            r#"{"ask":["ask"],"auto-edit":["auto-edit"],"full":["full"]}"#
-        );
+    fn task_status_serializes_as_the_board_reads_it() {
+        // These strings are the board's columns and the MCP tool's enum; the
+        // UI and an outside model both type them.
+        let all = [
+            TaskStatus::Backlog,
+            TaskStatus::Todo,
+            TaskStatus::Doing,
+            TaskStatus::Review,
+            TaskStatus::Done,
+        ];
+        let names: Vec<String> = all.iter().map(|s| serde_json::to_string(s).unwrap()).collect();
+        assert_eq!(names, ["\"backlog\"", "\"todo\"", "\"doing\"", "\"review\"", "\"done\""]);
     }
 
     #[test]

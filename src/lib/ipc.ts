@@ -2,7 +2,6 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   AddProjectInput,
-  AgentAdapter,
   GroupProgress,
   Group,
   ImportReport,
@@ -13,11 +12,10 @@ import type {
   RunRecord,
   ScanResult,
   Script,
-  WorkspaceInfo,
   Settings,
   Snapshot,
   Task,
-  TaskRun,
+  TaskStatus,
 } from "./types";
 
 export const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -27,7 +25,7 @@ export interface EventMap {
   "script:state": RunInfo;
   "group:progress": GroupProgress;
   "project:changed": { projectId: string };
-  "task:state": { task: Task; run: TaskRun | null };
+  "task:state": { task: Task };
   stats: ProcStats[];
   menu: string;
 }
@@ -61,24 +59,12 @@ export interface Backend {
   runHistory(scriptId: string): Promise<RunRecord[]>;
   /** loopback MCP API status + the command that registers the bridge */
   mcpInfo(): Promise<McpInfo>;
-  // --- AI tasks (docs/AI-PM.md) ---
-  agentList(): Promise<AgentAdapter[]>;
+  // --- board cards ---
   taskList(projectId: string): Promise<Task[]>;
   taskSave(task: Task): Promise<Task>;
   taskDelete(taskId: string): Promise<void>;
-  taskStart(taskId: string): Promise<void>;
-  taskStop(taskId: string): Promise<void>;
-  taskRuns(taskId: string): Promise<TaskRun[]>;
-  /** branches in the project's repository, for a base-branch picker */
-  projectBranches(projectId: string): Promise<string[]>;
-  /** a task's isolated checkout, or null when it has none (B1) */
-  taskWorkspace(taskId: string): Promise<WorkspaceInfo | null>;
-  taskWorkspaceDiscard(taskId: string, force: boolean): Promise<void>;
-  /** commit, push and open the PR by hand; resolves with what it did */
-  taskPublish(taskId: string): Promise<string>;
-  taskAttach(taskId: string, onData: (bytes: Uint8Array) => void): Promise<void>;
-  taskWrite(taskId: string, data: string): Promise<void>;
-  taskResize(taskId: string, cols: number, rows: number): Promise<void>;
+  /** moves a card to a column and a position; returns the new order */
+  taskMove(taskId: string, status: TaskStatus, before: string | null): Promise<Task[]>;
   on<K extends keyof EventMap>(event: K, handler: (payload: EventMap[K]) => void): Promise<() => void>;
 }
 
@@ -121,24 +107,10 @@ const tauriBackend: Backend = {
   dbBackup: (dest) => invoke("db_backup", { dest }),
   runHistory: (scriptId) => invoke("run_history", { scriptId }),
   mcpInfo: () => invoke("mcp_info"),
-  agentList: () => invoke("agent_list"),
   taskList: (projectId) => invoke("task_list", { projectId }),
   taskSave: (task) => invoke("task_save", { task }),
   taskDelete: (taskId) => invoke("task_delete", { taskId }),
-  taskStart: (taskId) => invoke("task_start", { taskId }),
-  taskStop: (taskId) => invoke("task_stop", { taskId }),
-  taskRuns: (taskId) => invoke("task_runs", { taskId }),
-  projectBranches: (projectId) => invoke("project_branches", { projectId }),
-  taskWorkspace: (taskId) => invoke("task_workspace", { taskId }),
-  taskWorkspaceDiscard: (taskId, force) => invoke("task_workspace_discard", { taskId, force }),
-  taskPublish: (taskId) => invoke("task_publish", { taskId }),
-  taskAttach: (taskId, onData) => {
-    const onDataChannel = new Channel<unknown>();
-    onDataChannel.onmessage = (msg) => onData(toBytes(msg));
-    return invoke("task_attach", { taskId, onData: onDataChannel });
-  },
-  taskWrite: (taskId, data) => invoke("task_write", { taskId, data }),
-  taskResize: (taskId, cols, rows) => invoke("task_resize", { taskId, cols, rows }),
+  taskMove: (taskId, status, before) => invoke("task_move", { taskId, status, before }),
   on: (event, handler) => listen(event, (e) => handler(e.payload as never)),
 };
 

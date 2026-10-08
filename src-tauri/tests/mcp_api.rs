@@ -14,8 +14,6 @@ struct Harness {
     notified: Arc<Mutex<Vec<String>>>,
     /// What the app was asked to do, in order.
     acted: Arc<Mutex<Vec<String>>>,
-    /// `settings.mcpAgentControl`, flipped per test.
-    gate: Arc<std::sync::atomic::AtomicBool>,
 }
 
 async fn setup() -> Harness {
@@ -32,7 +30,6 @@ async fn setup() -> Harness {
     let notified = Arc::new(Mutex::new(Vec::new()));
     let seen = notified.clone();
     let acted = Arc::new(Mutex::new(Vec::new()));
-    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let mut hooks = Hooks::none();
     hooks.running_scripts = Arc::new(|| 3);
@@ -51,25 +48,16 @@ async fn setup() -> Harness {
             Box::pin(async {}) as _
         })
     };
-    hooks.start_task = {
-        let log = acted.clone();
-        Arc::new(move |id: String| {
-            log.lock().unwrap().push(format!("start-task {id}"));
-            Box::pin(async { Ok(()) }) as _
-        })
-    };
-    hooks.publish_task = {
-        let log = acted.clone();
-        Arc::new(move |id: String| {
-            log.lock().unwrap().push(format!("publish {id}"));
-            Box::pin(async { Ok("pushed scriptr/x".to_string()) }) as _
+    hooks.move_task = {
+        let db = db.clone();
+        Arc::new(move |id: String, status, before: Option<String>| {
+            let db = db.clone();
+            Box::pin(async move {
+                scriptr_lib::tasks::move_task(&db, &id, status, before.as_deref()).map(drop)
+            }) as _
         })
     };
     hooks.logs = Arc::new(|key: &str, lines: usize| Ok(format!("{key}: {lines} lines requested\nsecond line")));
-    hooks.agent_control = {
-        let gate = gate.clone();
-        Arc::new(move || gate.load(std::sync::atomic::Ordering::SeqCst))
-    };
     let token = "test-token".to_string();
     let router = mcp_api::router(db.clone(), token.clone(), hooks);
 
@@ -78,7 +66,7 @@ async fn setup() -> Harness {
     tokio::spawn(async move {
         let _ = axum::serve(listener, router).await;
     });
-    Harness { db, base: format!("http://127.0.0.1:{port}"), token, notified, acted, gate }
+    Harness { db, base: format!("http://127.0.0.1:{port}"), token, notified, acted }
 }
 
 impl Harness {
@@ -92,10 +80,6 @@ impl Harness {
 
     async fn patch(&self, path: &str, token: Option<&str>, body: serde_json::Value) -> (u16, String) {
         self.send(reqwest_like::Method::Patch, path, token, Some(body)).await
-    }
-
-    fn allow_agent_control(&self) {
-        self.gate.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn acted(&self) -> Vec<String> {
@@ -169,7 +153,6 @@ async fn an_agent_files_a_task_into_the_backlog() {
                 "project": "/Users/dev/code/acme-platform/",
                 "title": "Rate-limit the checkout endpoint",
                 "goal": "10 req/min per account, 429 with Retry-After.",
-                "effort": "high",
                 "priority": 3
             }),
         )
@@ -180,10 +163,7 @@ async fn an_agent_files_a_task_into_the_backlog() {
     assert_eq!(tasks.len(), 1);
     let t = &tasks[0];
     assert_eq!(t.title, "Rate-limit the checkout endpoint");
-    // The whole safety story: filed, never started, and never full autonomy.
-    assert_eq!(t.status, TaskStatus::Backlog);
-    assert_eq!(t.autonomy, scriptr_lib::model::Autonomy::Ask);
-    assert_eq!(t.effort, Some(scriptr_lib::model::Effort::High));
+    assert_eq!(t.status, TaskStatus::Backlog, "a filed card starts in the backlog");
     assert_eq!(t.priority, 3);
     assert!(t.labels.iter().any(|l| l == "mcp"), "origin must be visible on the card: {:?}", t.labels);
     // The board hears about it without a reload.
@@ -215,10 +195,10 @@ async fn an_unknown_project_names_the_ones_that_exist() {
 }
 
 #[tokio::test]
-async fn an_empty_goal_is_refused() {
+async fn an_empty_title_is_refused() {
     let h = setup().await;
     let (code, body) = h
-        .post("/v1/tasks", Some(&h.token), serde_json::json!({"project": "p1", "title": "t", "goal": "   "}))
+        .post("/v1/tasks", Some(&h.token), serde_json::json!({"project": "p1", "title": "   ", "goal": "g"}))
         .await;
     assert_eq!(code, 400, "{body}");
     assert!(h.db.project_tasks("p1").unwrap().is_empty());
@@ -248,7 +228,7 @@ async fn file(h: &Harness, title: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_task_can_be_moved_and_retargeted_from_outside() {
+async fn a_card_can_be_edited_from_outside() {
     let h = setup().await;
     let id = file(&h, "Rate-limit checkout").await;
 
@@ -256,16 +236,16 @@ async fn a_task_can_be_moved_and_retargeted_from_outside() {
         .patch(
             &format!("/v1/tasks/{id}"),
             Some(&h.token),
-            serde_json::json!({"status": "queued", "priority": 3, "base": "staging", "workspace": "worktree"}),
+            serde_json::json!({"status": "todo", "priority": 3, "assignee": "me", "labels": ["urgent"]}),
         )
         .await;
     assert_eq!(code, 200, "{body}");
 
     let t = h.db.task(&id).unwrap();
-    assert_eq!(t.status, TaskStatus::Queued);
+    assert_eq!(t.status, TaskStatus::Todo);
     assert_eq!(t.priority, 3);
-    assert_eq!(t.base_branch.as_deref(), Some("staging"));
-    assert_eq!(t.workspace, scriptr_lib::model::WorkspaceMode::Worktree);
+    assert_eq!(t.assignee.as_deref(), Some("me"));
+    assert_eq!(t.labels, vec!["urgent".to_string()]);
     // Untouched fields stay as they were: a patch is not a replace.
     assert_eq!(t.title, "Rate-limit checkout");
     assert_eq!(t.goal, "g");
@@ -275,52 +255,20 @@ async fn a_task_can_be_moved_and_retargeted_from_outside() {
 }
 
 #[tokio::test]
-async fn an_empty_title_or_goal_cannot_be_patched_in() {
+async fn an_empty_title_cannot_be_patched_in() {
     let h = setup().await;
     let id = file(&h, "Keep me").await;
-    for bad in [serde_json::json!({"title": "  "}), serde_json::json!({"goal": ""})] {
-        let (code, body) = h.patch(&format!("/v1/tasks/{id}"), Some(&h.token), bad).await;
-        assert_eq!(code, 400, "{body}");
-    }
-    let t = h.db.task(&id).unwrap();
-    assert_eq!((t.title.as_str(), t.goal.as_str()), ("Keep me", "g"));
-}
-
-#[tokio::test]
-async fn starting_an_agent_run_needs_the_user_to_allow_it() {
-    let h = setup().await;
-    let id = file(&h, "Spend my money").await;
-
-    let (code, body) = h.post(&format!("/v1/tasks/{id}/start"), Some(&h.token), serde_json::json!({})).await;
-    assert_eq!(code, 403, "{body}");
-    // The refusal has to say how to allow it, since the model relays this.
-    assert!(body.contains("Settings"), "{body}");
-    assert!(h.acted().is_empty(), "nothing may have run: {:?}", h.acted());
-
-    h.allow_agent_control();
-    let (code, body) = h.post(&format!("/v1/tasks/{id}/start"), Some(&h.token), serde_json::json!({})).await;
-    assert_eq!(code, 200, "{body}");
-    assert_eq!(h.acted(), vec![format!("start-task {id}")]);
-}
-
-#[tokio::test]
-async fn a_running_task_keeps_its_status_out_of_a_callers_hands() {
-    let h = setup().await;
-    let id = file(&h, "In flight").await;
-    let mut t = h.db.task(&id).unwrap();
-    t.status = TaskStatus::Working;
-    h.db.upsert_task(&t).unwrap();
-
-    let (code, body) = h.patch(&format!("/v1/tasks/{id}"), Some(&h.token), serde_json::json!({"status": "done"})).await;
+    let (code, body) = h.patch(&format!("/v1/tasks/{id}"), Some(&h.token), serde_json::json!({"title": "  "})).await;
     assert_eq!(code, 400, "{body}");
-    assert!(body.contains("stop it"), "{body}");
-    assert_eq!(h.db.task(&id).unwrap().status, TaskStatus::Working);
+    assert_eq!(h.db.task(&id).unwrap().title, "Keep me");
 
-    // Other fields are still editable while it runs.
-    let (code, _) = h.patch(&format!("/v1/tasks/{id}"), Some(&h.token), serde_json::json!({"priority": 0})).await;
+    // A goal, unlike a title, may be cleared: plenty of cards are a title.
+    let (code, _) = h.patch(&format!("/v1/tasks/{id}"), Some(&h.token), serde_json::json!({"goal": ""})).await;
     assert_eq!(code, 200);
-    assert_eq!(h.db.task(&id).unwrap().priority, 0);
+    assert_eq!(h.db.task(&id).unwrap().goal, "");
 }
+
+
 
 #[tokio::test]
 async fn scripts_are_controlled_by_name_and_unknown_ones_list_the_choices() {
@@ -382,7 +330,7 @@ async fn every_new_route_demands_the_token() {
         };
         assert_eq!(code, 401, "{path} was reachable without a token");
     }
-    for path in [format!("/v1/tasks/{id}/start"), format!("/v1/tasks/{id}/stop"), "/v1/scripts/web/start".into()] {
+    for path in [format!("/v1/tasks/{id}/move"), "/v1/scripts/web/start".to_string()] {
         let (code, _) = h.post(&path, None, serde_json::json!({})).await;
         assert_eq!(code, 401, "{path} was reachable without a token");
     }
@@ -411,20 +359,42 @@ fn script(id: &str, project: &str, name: &str) -> scriptr_lib::model::Script {
     }
 }
 
+
 #[tokio::test]
-async fn publishing_is_not_gated_the_way_starting_a_run_is() {
+async fn moving_a_card_sets_its_column_and_its_place() {
     let h = setup().await;
-    let id = file(&h, "Ready to ship").await;
+    let a = file(&h, "A").await;
+    let b = file(&h, "B").await;
 
-    // No agent_control, on purpose: pushing a branch and opening a PR spends
-    // nothing and merges nothing, so it does not need the gate.
-    let (code, body) = h.post(&format!("/v1/tasks/{id}/publish"), Some(&h.token), serde_json::json!({})).await;
+    let (code, body) = h
+        .post(&format!("/v1/tasks/{b}/move"), Some(&h.token), serde_json::json!({"status": "doing", "before": a}))
+        .await;
     assert_eq!(code, 200, "{body}");
-    assert!(body.contains("pushed scriptr/x"), "{body}");
-    assert_eq!(h.acted(), vec![format!("publish {id}")]);
+    let order: Vec<String> = h.db.project_tasks("p1").unwrap().into_iter().map(|t| t.title).collect();
+    assert_eq!(order, ["B", "A"], "the card moved to the front");
+    assert_eq!(h.db.task(&b).unwrap().status, TaskStatus::Doing);
 
-    let (code, _) = h.post("/v1/tasks/nope/publish", Some(&h.token), serde_json::json!({})).await;
-    assert_eq!(code, 404);
-    let (code, _) = h.post(&format!("/v1/tasks/{id}/publish"), None, serde_json::json!({})).await;
-    assert_eq!(code, 401);
+    // A column is required; a missing one is a bad request, not a silent default.
+    let (code, _) = h.post(&format!("/v1/tasks/{a}/move"), Some(&h.token), serde_json::json!({})).await;
+    assert_eq!(code, 400);
+    // And placing a card before a stranger is refused rather than guessed at.
+    let (code, _) = h
+        .post(&format!("/v1/tasks/{a}/move"), Some(&h.token), serde_json::json!({"status": "todo", "before": "ghost"}))
+        .await;
+    assert_eq!(code, 400);
+}
+
+#[tokio::test]
+async fn a_card_cannot_be_blocked_by_itself() {
+    let h = setup().await;
+    let a = file(&h, "A").await;
+    let b = file(&h, "B").await;
+
+    let (code, _) = h.patch(&format!("/v1/tasks/{b}"), Some(&h.token), serde_json::json!({"after": [a]})).await;
+    assert_eq!(code, 200);
+    assert_eq!(h.db.task(&b).unwrap().after, vec![a.clone()]);
+
+    let (code, body) = h.patch(&format!("/v1/tasks/{b}"), Some(&h.token), serde_json::json!({"after": [b]})).await;
+    assert_eq!(code, 400, "{body}");
+    assert!(body.contains("itself"), "{body}");
 }

@@ -1,15 +1,14 @@
-import { createMemo, createResource, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
+import { onCleanup, onMount, Show } from "solid-js";
 import { Icon } from "../components/Icon";
 import { popupMenu } from "../lib/menu";
-import { AUTONOMY_LABEL, PRIORITY_LABEL, tildify } from "../lib/format";
-import type { Autonomy, Task, WorkspaceMode } from "../lib/types";
-import { backend } from "../lib/ipc";
-import { agent, closeComposer, currentProject, newTaskDraft, openComposer, saveTask, startTask, state, task } from "../store/app";
+import { PRIORITY_LABEL, TASK_STATUS_LABEL } from "../lib/format";
+import type { Task, TaskStatus } from "../lib/types";
+import { closeComposer, currentProject, newTaskDraft, openComposer, saveTask, task, tasksOf } from "../store/app";
 
-const AUTONOMY: Autonomy[] = ["ask", "auto-edit", "full"];
+const COLUMNS: TaskStatus[] = ["backlog", "todo", "doing", "review", "done"];
 
-/** Compose or edit an agent task (docs/AI-PM.md slice A). */
+/** Compose or edit a board card. */
 export function TaskComposer(props: { taskId: string }) {
   const editing = () => (props.taskId ? task(props.taskId) : undefined);
   const project = () => currentProject()!;
@@ -17,30 +16,15 @@ export function TaskComposer(props: { taskId: string }) {
     editing() ? structuredClone(unwrap(editing()!)) : newTaskDraft(project().id),
   );
 
-  const chosen = () => agent(draft.agentId);
-  const valid = () => draft.title.trim().length > 0 && draft.goal.trim().length > 0 && !!chosen()?.available;
+  const valid = () => draft.title.trim().length > 0;
 
-  const agentMenu = (e: MouseEvent) =>
+  const statusMenu = (e: MouseEvent) =>
     popupMenu(
-      state.agents.map((a) => ({
-        label: a.available ? `${a.name}${a.version ? `  ${a.version}` : ""}` : `${a.name} — not installed`,
-        checked: a.id === draft.agentId,
-        enabled: a.available,
-        action: () => {
-          setDraft("agentId", a.id);
-          setDraft("model", null);
-          setDraft("assignee", `agent:${a.id}`);
-        },
+      COLUMNS.map((s) => ({
+        label: TASK_STATUS_LABEL[s],
+        checked: draft.status === s,
+        action: () => setDraft("status", s),
       })),
-      e.currentTarget as HTMLElement,
-    );
-
-  const modelMenu = (e: MouseEvent) =>
-    popupMenu(
-      [
-        { label: "Agent default", checked: !draft.model, action: () => setDraft("model", null) },
-        ...(chosen()?.models ?? []).map((m) => ({ label: m, checked: draft.model === m, action: () => setDraft("model", m) })),
-      ],
       e.currentTarget as HTMLElement,
     );
 
@@ -50,54 +34,43 @@ export function TaskComposer(props: { taskId: string }) {
       e.currentTarget as HTMLElement,
     );
 
-  // Only fetched once the task is actually isolated: a plain in-place task has
-  // no use for a base, and the project may not even be a repository.
-  const [branches] = createResource(
-    () => (draft.workspace === "worktree" ? project().id : undefined),
-    (id) => backend.projectBranches(id).catch(() => [] as string[]),
-  );
-
-  const baseMenu = (e: MouseEvent) =>
+  /** Any other card in this project can block this one. */
+  const blockerMenu = (e: MouseEvent) =>
     popupMenu(
-      [
-        { label: "Current branch", checked: !draft.baseBranch, action: () => setDraft("baseBranch", null) },
-        ...(branches() ?? []).map((b) => ({
-          label: b,
-          checked: draft.baseBranch === b,
-          action: () => setDraft("baseBranch", b),
+      tasksOf(project().id)
+        .filter((t) => t.id !== draft.id)
+        .map((t) => ({
+          label: t.title || "Untitled",
+          checked: draft.after.includes(t.id),
+          action: () =>
+            setDraft("after", (list) => (list.includes(t.id) ? list.filter((x) => x !== t.id) : [...list, t.id])),
         })),
-      ],
       e.currentTarget as HTMLElement,
     );
 
-  const save = async (andRun: boolean) => {
+  const save = async () => {
     if (!valid()) return;
-    const saved = await saveTask({ ...structuredClone(unwrap(draft)), title: draft.title.trim(), goal: draft.goal.trim() });
+    await saveTask({ ...structuredClone(unwrap(draft)), title: draft.title.trim(), goal: draft.goal.trim() });
     closeComposer();
-    if (saved && andRun) void startTask(saved.id);
   };
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") closeComposer();
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save(true);
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void save();
     };
     window.addEventListener("keydown", onKey);
     onCleanup(() => window.removeEventListener("keydown", onKey));
   });
 
-  const missing = createMemo(() => state.agents.filter((a) => !a.available).map((a) => a.name));
+  const blockerNames = () => draft.after.map((id) => task(id)?.title ?? id);
 
   return (
     <>
       <div class="scrim light" onClick={closeComposer} />
-      <div class="dialog composer" role="dialog" aria-label={editing() ? "Edit task" : "New task"}>
+      <div class="dialog composer" role="dialog" aria-label={editing() ? "Edit card" : "New card"}>
         <div class="modal-header" style={{ gap: "12px" }}>
-          <p class="t-display-20 c-primary">{editing() ? "Edit task" : "New task"}</p>
-          <p class="t-caption-11 c-muted">
-            The agent runs in <span class="t-mono-11">{tildify(project().path)}</span> and edits files directly — worktree
-            isolation lands in the next slice.
-          </p>
+          <p class="t-display-20 c-primary">{editing() ? "Edit card" : "New card"}</p>
         </div>
 
         <div class="composer-body scroll-y">
@@ -105,21 +78,22 @@ export function TaskComposer(props: { taskId: string }) {
             <span class="field-label">Title</span>
             <label class="input">
               <input
-                ref={(el) => queueMicrotask(() => el.focus())}
-                placeholder="Rate-limit the checkout endpoint"
+                type="text"
                 value={draft.title}
+                placeholder="Rate-limit the checkout endpoint"
+                autofocus
                 onInput={(e) => setDraft("title", e.currentTarget.value)}
               />
             </label>
           </div>
 
           <div class="field">
-            <span class="field-label">Goal</span>
+            <span class="field-label">Detail</span>
             <label class="input">
               <textarea
-                rows={6}
-                placeholder="What should the agent do? Be specific about the acceptance criteria — this is the prompt."
+                rows={5}
                 value={draft.goal}
+                placeholder="Why this card exists, and what finishing it looks like."
                 onInput={(e) => setDraft("goal", e.currentTarget.value)}
               />
             </label>
@@ -127,23 +101,14 @@ export function TaskComposer(props: { taskId: string }) {
 
           <div class="composer-row">
             <div class="field grow">
-              <span class="field-label">Agent</span>
-              <button class="select" onClick={agentMenu}>
-                <Icon name="terminal" size={13} color="var(--text-secondary)" />
-                {chosen()?.name ?? "Pick an agent"}
+              <span class="field-label">Column</span>
+              <button class="select" onClick={statusMenu}>
+                {TASK_STATUS_LABEL[draft.status]}
                 <div class="grow" />
                 <Icon name="chevron-down" size={12} color="var(--text-muted)" />
               </button>
             </div>
-            <div class="field grow">
-              <span class="field-label">Model</span>
-              <button class="select" onClick={modelMenu} disabled={!chosen()}>
-                {draft.model ?? "Agent default"}
-                <div class="grow" />
-                <Icon name="chevron-down" size={12} color="var(--text-muted)" />
-              </button>
-            </div>
-            <div class="field" style={{ width: "120px" }}>
+            <div class="field" style={{ width: "140px" }}>
               <span class="field-label">Priority</span>
               <button class="select" onClick={priorityMenu}>
                 {PRIORITY_LABEL[draft.priority] ?? "None"}
@@ -153,60 +118,65 @@ export function TaskComposer(props: { taskId: string }) {
             </div>
           </div>
 
-          <div class="field">
-            <span class="field-label">Autonomy</span>
-            <div class="seg bordered">
-              <For each={AUTONOMY}>
-                {(a) => (
-                  <button class="seg-opt" aria-pressed={draft.autonomy === a} onClick={() => setDraft("autonomy", a)}>
-                    {AUTONOMY_LABEL[a]}
-                  </button>
-                )}
-              </For>
+          <div class="composer-row">
+            <div class="field grow">
+              <span class="field-label">Assignee</span>
+              <label class="input">
+                <input
+                  type="text"
+                  value={draft.assignee ?? ""}
+                  placeholder="me"
+                  onInput={(e) => setDraft("assignee", e.currentTarget.value.trim() || null)}
+                />
+              </label>
             </div>
-            <p class="t-caption-11 c-muted">
-              {draft.autonomy === "ask"
-                ? "You answer the agent's permission prompts in the terminal."
-                : draft.autonomy === "auto-edit"
-                  ? "File edits are accepted automatically; shell commands still ask."
-                  : "The agent runs without asking. Use it only on work you can throw away."}
-            </p>
+            <div class="field grow">
+              <span class="field-label">Linked issue</span>
+              <label class="input">
+                <input
+                  type="text"
+                  value={draft.issueUrl ?? ""}
+                  placeholder="https://github.com/…/issues/1"
+                  onInput={(e) => setDraft("issueUrl", e.currentTarget.value.trim() || null)}
+                />
+              </label>
+            </div>
           </div>
 
           <div class="field">
-            <span class="field-label">Workspace</span>
-            <div class="composer-row">
-              <div class="seg bordered">
-                <For each={["in-place", "worktree"] as WorkspaceMode[]}>
-                  {(w) => (
-                    <button class="seg-opt" aria-pressed={draft.workspace === w} onClick={() => setDraft("workspace", w)}>
-                      {w === "in-place" ? "In place" : "Own branch"}
-                    </button>
-                  )}
-                </For>
-              </div>
-              <Show when={draft.workspace === "worktree"}>
-                <button class="select grow" onClick={baseMenu}>
-                  {draft.baseBranch ?? "Current branch"}
-                  <div class="grow" />
-                  <Icon name="chevron-down" size={12} color="var(--text-muted)" />
-                </button>
-              </Show>
-            </div>
-            <p class="t-caption-11 c-muted">
-              {draft.workspace === "in-place"
-                ? "The agent edits the project directory you have open."
-                : `A git worktree on its own branch, cut from ${draft.baseBranch ?? "the current branch"}. Dependencies are not copied — a fresh checkout has no node_modules or .venv.`}
-            </p>
+            <span class="field-label">Labels</span>
+            <label class="input">
+              <input
+                type="text"
+                value={draft.labels.join(", ")}
+                placeholder="bug, ci"
+                onInput={(e) =>
+                  setDraft(
+                    "labels",
+                    e.currentTarget.value
+                      .split(",")
+                      .map((l) => l.trim())
+                      .filter(Boolean),
+                  )
+                }
+              />
+            </label>
           </div>
 
-          <Show when={missing().length > 0}>
-            <p class="t-caption-11 c-muted">Not installed: {missing().join(", ")}.</p>
+          <Show when={tasksOf(project().id).some((t) => t.id !== draft.id)}>
+            <div class="field">
+              <span class="field-label">Blocked by</span>
+              <button class="select" onClick={blockerMenu}>
+                {blockerNames().length > 0 ? blockerNames().join(", ") : "Nothing"}
+                <div class="grow" />
+                <Icon name="chevron-down" size={12} color="var(--text-muted)" />
+              </button>
+            </div>
           </Show>
         </div>
 
         <div class="modal-footer">
-          <Show when={editing()} fallback={<span class="t-caption-11 c-muted">Saved to the backlog until you run it.</span>}>
+          <Show when={editing()}>
             <button class="btn btn-secondary btn-sm" onClick={() => openComposer("")}>
               New instead
             </button>
@@ -215,12 +185,13 @@ export function TaskComposer(props: { taskId: string }) {
           <button class="btn btn-secondary" style={{ padding: "9px 14px", "border-radius": "8px" }} onClick={closeComposer}>
             Cancel
           </button>
-          <button class="btn btn-secondary" style={{ padding: "9px 14px", "border-radius": "8px" }} disabled={!valid()} onClick={() => void save(false)}>
+          <button
+            class="btn btn-primary"
+            style={{ padding: "9px 16px", "border-radius": "8px" }}
+            disabled={!valid()}
+            onClick={() => void save()}
+          >
             Save
-          </button>
-          <button class="btn btn-primary" style={{ padding: "9px 16px", "border-radius": "8px" }} disabled={!valid()} onClick={() => void save(true)}>
-            <Icon name="play" size={12} />
-            Save and run
           </button>
         </div>
       </div>

@@ -825,111 +825,37 @@ html.vibrant .settings-nav {
   background: var(--bg-canvas);
 }
 
-/* ---------------------------------------------------------------- agent deck (AI slice 2) */
-.deck {
-  position: relative;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  background: var(--bg-terminal);
-  border-top: 1px solid var(--border-subtle);
-}
-.deck[data-state="max"] {
-  flex: 1 1 0;
-}
-.deck-resizer {
-  position: absolute;
-  top: -3px;
-  left: 0;
-  right: 0;
-  height: 7px;
-  z-index: 10;
-  cursor: row-resize;
-  touch-action: none;
-}
-.deck-resizer::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 2px;
-  height: 2px;
-  background: transparent;
-  transition: background-color 120ms ease 80ms;
-}
-.deck-resizer:hover::after,
-.deck-resizer[data-dragging="true"]::after {
-  background: var(--accent);
-}
-html.row-resizing,
-html.row-resizing * {
-  cursor: row-resize !important;
-  user-select: none !important;
-}
-.deck-rail {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  height: 36px;
-  padding: 0 14px 0 18px;
-  background: var(--bg-rail);
-}
-.deck-rail:hover {
-  background: var(--bg-raised);
-}
-.deck-rail-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font: 400 12px/18px var(--font-ui);
-  color: var(--text-secondary);
-  min-width: 0;
-}
-.deck-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  height: 34px;
-  padding: 0 10px 0 8px;
-  background: var(--bg-sidebar);
-  border-bottom: 1px solid var(--border-subtle);
+/* ---------------------------------------------------------------- board cards */
+.tc-goal {
+  margin: 0;
+  font: 400 11px/16px var(--font-ui);
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.deck-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  font: 400 12px/18px var(--font-ui);
-  color: var(--text-secondary);
-}
-.deck-chip:hover {
-  color: var(--text-primary);
-}
-.deck-chip[aria-selected="true"] {
-  background: var(--bg-terminal);
-  color: var(--text-primary);
-}
-.deck-body {
-  position: relative;
-  flex: 1 1 0;
-  min-height: 0;
-}
-.deck-body .term-host .xterm {
-  padding: 10px 14px 10px 18px;
-}
-
-/* The PR chip is the one clickable chip: a destination, not a label. */
-.tc-chip-pr {
-  background: var(--accent-subtle);
-  color: var(--accent);
-  border: none;
-  cursor: pointer;
+.tc-blocked {
+  margin: 0;
   font: 500 11px/16px var(--font-ui);
+  color: var(--status-review, var(--text-secondary));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.tc-chip-pr:hover {
-  background: var(--bg-raised);
+/* A drop target shows where the card will land, above the slot it marks. */
+.board-slot[data-before="true"] {
+  box-shadow: inset 0 2px 0 0 var(--accent);
+  border-radius: 2px;
+}
+.board-col[data-over="true"] .board-col-body {
+  background: var(--accent-subtle);
+  border-radius: 6px;
+}
+.board-tail {
+  min-height: 36px;
+  flex: 1 1 auto;
+}
+.task-card[draggable="true"] {
+  cursor: grab;
 }

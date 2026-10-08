@@ -108,28 +108,23 @@ fn tools() -> Value {
     json!([
         {
             "name": "file_task",
-            "title": "File a task in Scriptr",
-            "description": "Add a task to a Scriptr project's backlog, to be run later by a coding agent. \
-The task is NOT started: a human reviews and runs it. Use this to hand work to the developer's \
-Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
+            "title": "Add a card to the Scriptr board",
+            "description": "Create a task on a Scriptr project's Kanban board. Use it to record work: what to do and what finishing looks like. Works even when Scriptr is closed — the card appears when it next opens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "description": "Scriptr project name, path, or id. Use the repository directory you are working in."},
                     "title": {"type": "string", "description": "Short imperative title, e.g. 'Rate-limit the checkout endpoint'"},
-                    "goal": {"type": "string", "description": "The prompt the coding agent will receive: what to do and what done looks like. Be specific."},
-                    "agentId": {"type": "string", "description": "Optional agent: claude-code, opencode, cursor-agent, gemini, aider"},
-                    "model": {"type": "string"},
-                    "effort": {"type": "string", "enum": ["low", "medium", "high", "extra", "max", "ultracode"]},
+                    "goal": {"type": "string", "description": "Optional detail: why this card exists and what finishing it looks like."},
+                    "status": {"type": "string", "enum": ["backlog", "todo", "doing", "review", "done"], "description": "Column to file it in. Default backlog."},
                     "priority": {"type": "integer", "minimum": 0, "maximum": 3, "description": "0 none, 1 low, 2 medium, 3 high"},
+                    "assignee": {"type": "string"},
                     "labels": {"type": "array", "items": {"type": "string"}},
-                    "issueUrl": {"type": "string"},
-                    "workspace": {"type": "string", "enum": ["in-place", "worktree"], "description": "worktree gives the agent its own checkout on its own branch; in-place uses the project directory. Default in-place."},
-                    "base": {"type": "string", "description": "Branch the work is cut from and its PR will target, e.g. main or staging. Omit for whatever the repository is on."}
+                    "issueUrl": {"type": "string"}
                 },
-                "required": ["project", "title", "goal"]
+                "required": ["project", "title"]
             },
-            "annotations": {"title": "File a task in Scriptr", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
+            "annotations": {"title": "Add a card to the Scriptr board", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false}
         },
         {
             "name": "list_projects",
@@ -157,8 +152,8 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
         },
         {
             "name": "get_task",
-            "title": "Read one Scriptr task",
-            "description": "Everything about one task: its goal, status, branch, agent, every run with exit code, token cost and duration, and where its worktree is. Use it to find out how a task went before deciding what to do next.",
+            "title": "Read one board card",
+            "description": "One card in full: title, detail, column, priority, labels, assignee, linked issue, and the cards it is blocked by.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"taskId": {"type": "string", "description": "Task id, as list_tasks reports it"}},
@@ -168,38 +163,38 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
         },
         {
             "name": "update_task",
-            "title": "Update a Scriptr task",
-            "description": "Change a filed task: move it between board columns, re-prioritise it, raise its effort, retarget its base branch, rewrite its goal, or add labels. Only the fields you pass are touched. A running task's status cannot be changed — stop it first.",
+            "title": "Update a board card",
+            "description": "Change a card: move it between columns, re-prioritise it, rewrite its title or detail, set an assignee or labels, or record what blocks it. Only the fields you pass are touched.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "taskId": {"type": "string"},
-                    "status": {"type": "string", "enum": ["backlog", "queued", "working", "verifying", "review", "done", "failed", "cancelled"], "description": "Board column. Use 'queued' to mark it ready, 'done' when it is finished."},
+                    "status": {"type": "string", "enum": ["backlog", "todo", "doing", "review", "done"]},
                     "title": {"type": "string"},
-                    "goal": {"type": "string", "description": "Rewrites the prompt the agent will receive."},
+                    "goal": {"type": "string"},
                     "priority": {"type": "integer", "minimum": 0, "maximum": 3},
-                    "effort": {"type": "string", "enum": ["low", "medium", "high", "extra", "max", "ultracode"]},
-                    "base": {"type": "string", "description": "Branch the work targets, e.g. main or staging."},
-                    "workspace": {"type": "string", "enum": ["in-place", "worktree"]},
+                    "assignee": {"type": "string"},
                     "labels": {"type": "array", "items": {"type": "string"}},
-                    "issueUrl": {"type": "string"}
+                    "issueUrl": {"type": "string"},
+                    "after": {"type": "array", "items": {"type": "string"}, "description": "Task ids this card is blocked by. Replaces the list."}
                 },
                 "required": ["taskId"]
             },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
         },
         {
-            "name": "start_task",
-            "title": "Start a Scriptr agent run",
-            "description": "Runs a task's coding agent now. This spends tokens and edits the developer's code, so it is refused unless they have turned on 'Let agents start runs' in Scriptr's settings. Prefer file_task and let them press Run.",
-            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
-            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true}
-        },
-        {
-            "name": "stop_task",
-            "title": "Stop a Scriptr agent run",
-            "description": "Stops a task's running agent, signalling its whole process group. The task is recorded as cancelled.",
-            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
+            "name": "move_task",
+            "title": "Move a card on the board",
+            "description": "Put a card in a column at a chosen position, the way dragging it would. Use `before` to place it above a specific card; omit it to put the card at the end.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskId": {"type": "string"},
+                    "status": {"type": "string", "enum": ["backlog", "todo", "doing", "review", "done"]},
+                    "before": {"type": "string", "description": "Id of the card to place this one before. Omit for last."}
+                },
+                "required": ["taskId", "status"]
+            },
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
         },
         {
@@ -250,13 +245,6 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
                 "required": ["target"]
             },
             "annotations": {"readOnlyHint": true}
-        },
-        {
-            "name": "publish_task",
-            "title": "Open a pull request for a task",
-            "description": "Commits whatever the agent left uncommitted on the task's branch, pushes it, and opens a pull request against the task's base branch. Only works for a task running on its own branch. Safe to call twice: an existing PR is reused rather than duplicated.",
-            "inputSchema": {"type": "object", "properties": {"taskId": {"type": "string"}}, "required": ["taskId"]},
-            "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true}
         },
         {
             "name": "list_groups",
@@ -335,7 +323,7 @@ fn call_tool(name: &str, args: &Value) -> Value {
             }
         }
         "file_task" => {
-            for key in ["project", "title", "goal"] {
+            for key in ["project", "title"] {
                 if args.get(key).and_then(Value::as_str).map(str::trim).unwrap_or("").is_empty() {
                     return text_result(format!("`{key}` is required and must not be empty"), true);
                 }
@@ -343,8 +331,9 @@ fn call_tool(name: &str, args: &Value) -> Value {
             match request("POST", "/v1/tasks", Some(args.clone())) {
                 Call::Ok(v) => text_result(
                     format!(
-                        "Filed \"{}\" in Scriptr's backlog. It will not run until the developer starts it.",
-                        v["title"].as_str().unwrap_or("task")
+                        "Added \"{}\" to the Scriptr board, in {}.",
+                        v["title"].as_str().unwrap_or("task"),
+                        v["status"].as_str().unwrap_or("backlog")
                     ),
                     false,
                 ),
@@ -387,30 +376,13 @@ fn call_tool(name: &str, args: &Value) -> Value {
                 Call::Offline(why) | Call::Failed(why) => text_result(why, true),
             }
         }
-        "start_task" | "stop_task" => {
+        "move_task" => {
             let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
-            let verb = if name == "start_task" { "start" } else { "stop" };
-            match request("POST", &format!("/v1/tasks/{}/{verb}", urlencode(&id)), Some(json!({}))) {
+            let Some(status) = req_str(args, "status") else { return missing("status") };
+            let body = json!({ "status": status, "before": args.get("before").and_then(Value::as_str) });
+            match request("POST", &format!("/v1/tasks/{}/move", urlencode(&id)), Some(body)) {
                 Call::Ok(v) => text_result(
-                    format!(
-                        "{} \"{}\" — now [{}].",
-                        if verb == "start" { "Started" } else { "Stopped" },
-                        v["title"].as_str().unwrap_or("task"),
-                        v["status"].as_str().unwrap_or("?")
-                    ),
-                    false,
-                ),
-                Call::Offline(why) | Call::Failed(why) => text_result(why, true),
-            }
-        }
-        "publish_task" => {
-            let Some(id) = req_str(args, "taskId") else { return missing("taskId") };
-            match request("POST", &format!("/v1/tasks/{}/publish", urlencode(&id)), Some(json!({}))) {
-                Call::Ok(v) => text_result(
-                    match v["prUrl"].as_str() {
-                        Some(url) => format!("{}\n\nPull request: {url}", v["did"].as_str().unwrap_or("published")),
-                        None => v["did"].as_str().unwrap_or("published").to_string(),
-                    },
+                    format!("Moved \"{}\" to {status}.", v["title"].as_str().unwrap_or("the card")),
                     false,
                 ),
                 Call::Offline(why) | Call::Failed(why) => text_result(why, true),
@@ -543,42 +515,31 @@ fn describe_script(s: &Value) -> String {
     line
 }
 
-/// A task plus its run history, since "how did it go" is the usual question.
+/// One card, as a model should read it: what it is, where it sits, and what
+/// is holding it up.
 fn describe_task(v: &Value) -> String {
     let mut out = format!(
-        "{}\n  status: {}\n  goal: {}\n  agent: {}",
+        "{}\n  status: {}\n  priority: {}",
         v["title"].as_str().unwrap_or("?"),
         v["status"].as_str().unwrap_or("?"),
-        v["goal"].as_str().unwrap_or("?"),
-        v["agentId"].as_str().unwrap_or("?"),
+        v["priority"]
     );
-    for (label, key) in [("effort", "effort"), ("branch", "branch"), ("base", "baseBranch"), ("pull request", "prUrl")] {
+    if let Some(goal) = v["goal"].as_str().filter(|g| !g.trim().is_empty()) {
+        out += &format!("\n  detail: {goal}");
+    }
+    for (label, key) in [("assignee", "assignee"), ("issue", "issueUrl")] {
         if let Some(x) = v[key].as_str() {
             out += &format!("\n  {label}: {x}");
         }
     }
-    if let Some(path) = v["workspacePath"].as_str() {
-        out += &format!("\n  workspace: {path}");
+    let labels: Vec<&str> = v["labels"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if !labels.is_empty() {
+        out += &format!("\n  labels: {}", labels.join(", "));
     }
-    let runs = v["runs"].as_array().map(Vec::as_slice).unwrap_or_default();
-    if runs.is_empty() {
-        out += "\n  never run";
-        return out;
+    let blocked: Vec<&str> = v["after"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    if !blocked.is_empty() {
+        out += &format!("\n  blocked by: {}", blocked.join(", "));
     }
-    out += &format!("\n  {} run(s):", runs.len());
-    for r in runs {
-        out += &format!("\n    - {}", r["state"].as_str().unwrap_or("?"));
-        if let Some(code) = r["exitCode"].as_i64() {
-            out += &format!(", exit {code}");
-        }
-        if let Some(turns) = r["turns"].as_u64() {
-            out += &format!(", {turns} turns");
-        }
-        if let Some(cost) = r["costUsd"].as_f64() {
-            out += &format!(", ${cost:.2}");
-        }
-    }
-    out += "\n  (use get_logs with target \"task:<id>\" for the agent's output)";
     out
 }
 

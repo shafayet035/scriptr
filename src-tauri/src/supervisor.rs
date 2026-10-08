@@ -25,7 +25,7 @@ use tokio::task::JoinSet;
 
 use crate::db::Db;
 use crate::graph;
-use crate::model::{now_ms, Gate, GroupProgress, RestartOn, RestartPolicy, RunInfo, RunState, Script, Task, TaskRun};
+use crate::model::{now_ms, Gate, GroupProgress, RestartOn, RestartPolicy, RunInfo, RunState, Script, Task};
 use crate::pty::{self, DataSink, LogMatcher, ProcessGroup, RunKey, SpawnSpec, Terminal, Terminals};
 
 /// SIGTERM → SIGKILL grace period.
@@ -42,7 +42,7 @@ pub trait EventSink: Send + Sync + 'static {
     fn run_changed(&self, info: &RunInfo);
     fn group_progress(&self, progress: &GroupProgress);
     /// `task:state`. Defaulted so script-only sinks need no change.
-    fn task_changed(&self, _task: &Task, _run: Option<&TaskRun>) {}
+    fn task_changed(&self, _task: &Task) {}
 }
 
 /// Whether a script currently satisfies dependents.

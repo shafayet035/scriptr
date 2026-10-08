@@ -13,6 +13,7 @@ Scriptr is a small, native-feeling desktop app built with [Tauri](https://tauri.
 - **Groups that start in waves** — "Full stack", "Backend only": Scriptr builds a dependency graph, rejects cycles, starts each wave in parallel and waits for every gate before the next. Shutdown runs in reverse.
 - **Crash handling** — per-script restart policy (never / on crash / always) with exponential backoff, attempt counters and a clear crash banner.
 - **Stops the whole process tree** — `npm run dev` and `poetry run …` fork children; Scriptr signals the process group (SIGTERM, grace period, SIGKILL) so nothing is left holding your ports.
+- **A Kanban board** — a column per state (Backlog, To do, In progress, Review, Done), cards you drag between them, with priorities, labels, assignees, linked issues and blockers. Readable and writable from an AI client over MCP, so Claude can keep it up to date.
 - **Command palette** — ⌘K to fuzzy-find and run, restart or stop anything across projects.
 - **Local first, team friendly** — everything lives in a local SQLite database; export a `scriptr.toml` to commit and share the same setup with your team.
 - **Native feel** — system font, native menus and dialogs, sidebar vibrancy, window state restore.
@@ -106,12 +107,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 - Signed releases and auto-update
 - Combined, time-interleaved log view across a group
 
-## Driving it from an AI agent
+## Driving it from an AI client
 
-Scriptr is an MCP server. Claude Code can list what a project runs, bring the
-stack up in dependency order, read the logs of whatever broke, and file work
-onto the board — see [docs/MCP.md](docs/MCP.md). Starting an agent run from
-outside is off by default.
+Scriptr is an MCP server. Claude Desktop (or Claude Code) can read and move
+cards on the board, list what a project runs, bring the stack up in dependency
+order, and read the logs of whatever broke — see [docs/MCP.md](docs/MCP.md).
 
 ## License
 
