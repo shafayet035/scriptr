@@ -110,6 +110,12 @@ That loop is the product.
 - Budget caps (tokens / wall-clock / turns) with hard stop; "Stop everything" already reaps process trees.
 - An audit trail per task: prompt, diff, commands run, exit codes, cost.
 
+## The review loop
+
+Slices B and C, specified in detail: [REVIEW-LOOP.md](REVIEW-LOOP.md) — worktree
+per task, PR against a per-task base branch, verify gates, a read-only Reviewer
+Agent with a structured verdict, and a merge only a human performs.
+
 ## Roadmap sketch
 
 | Slice | Content | Why this order |
