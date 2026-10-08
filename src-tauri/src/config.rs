@@ -14,6 +14,37 @@ use crate::model::{Gate, Group, ImportMode, ImportReport, RestartOn, RestartPoli
 pub const FILE_NAME: &str = "scriptr.toml";
 const HEADER: &str = "# scriptr.toml — commit this at the project root\n";
 
+/// What an otherwise empty file says. A project can be added with no scripts at
+/// all — Scriptr still writes the file, so the project has somewhere to declare
+/// them, and anything reading the repository (an AI client, a teammate) can see
+/// the shape without being told it.
+const TEMPLATE: &str = r#"
+# No scripts yet. Uncomment and edit, or add them in Scriptr and they appear here.
+#
+# [[script]]
+# name = "db"
+# cmd = "docker compose up postgres"
+# ready = { port = 5432, timeout = "30s" }
+#
+# [[script]]
+# name = "migrate"
+# cmd = "npm run migrate"
+# after = ["db"]
+# ready = { exit = 0, timeout = "2m" }
+#
+# [[script]]
+# name = "api"
+# cmd = "npm run dev"
+# cwd = "apps/api"
+# port = 3000
+# after = ["migrate"]
+# ready = { log = "listening on", timeout = "1m" }
+#
+# [[group]]
+# name = "Full stack"
+# scripts = ["db", "migrate", "api"]
+"#;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
@@ -162,6 +193,9 @@ fn push_block(out: &mut String, header: &str, fields: &[(&str, String)]) {
 pub fn render(scripts: &[Script], groups: &[Group]) -> String {
     let names: HashMap<&str, &str> = scripts.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect();
     let name_list = |ids: &[String]| quote_list(ids.iter().filter_map(|id| names.get(id.as_str()).copied()));
+    if scripts.is_empty() && groups.is_empty() {
+        return format!("{HEADER}{TEMPLATE}");
+    }
     let mut out = HEADER.to_string();
     for s in scripts {
         let mut f: Vec<(&str, String)> = vec![("name", quote(&s.name))];
@@ -196,6 +230,18 @@ pub fn render(scripts: &[Script], groups: &[Group]) -> String {
         push_block(&mut out, "[[group]]", &[("name", quote(&g.name)), ("scripts", name_list(&g.script_ids))]);
     }
     out
+}
+
+/// Writes `<project>/scriptr.toml` only when there is no file there yet, so
+/// adding a project never clobbers one a teammate wrote — including the one it
+/// may have just imported from. `Ok(None)` means a file was already present.
+pub fn export_if_absent(db: &Db, project_id: &str) -> Result<Option<PathBuf>, String> {
+    let project = db.project(project_id)?;
+    let path = Path::new(&project.path).join(FILE_NAME);
+    if path.exists() {
+        return Ok(None);
+    }
+    export(db, project_id).map(Some)
 }
 
 /// Exports a project to `<project>/scriptr.toml`, returning the path.
@@ -548,5 +594,94 @@ scripts = ["db", "migrate", "api"]
         let bad = "[[script]]\nname = \"a\"\ncmd = \"x\"\nafter = [\"ghost\"]\n";
         let err = plan_import("p", &[], &[], bad, ImportMode::Merge).err().unwrap();
         assert!(err.contains("ghost"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod scaffold_tests {
+    use super::*;
+    use crate::model::Project;
+
+    fn project_in(dir: &Path) -> (Db, String) {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_project(&Project {
+            id: "p".into(),
+            name: "p".into(),
+            path: dir.to_string_lossy().into_owned(),
+            branch: None,
+            sort_order: 0,
+        })
+        .unwrap();
+        (db, "p".to_string())
+    }
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("scriptr-scaffold-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A project with nothing detected still gets a file, and that file tells
+    /// you how to fill it in rather than being one dangling comment.
+    #[test]
+    fn an_empty_project_gets_a_commented_template() {
+        let dir = tmp("empty");
+        let (db, id) = project_in(&dir);
+
+        let path = export_if_absent(&db, &id).unwrap().expect("a file was written");
+        assert_eq!(path, dir.join(FILE_NAME));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("commit this at the project root"));
+        assert!(text.contains("# [[script]]"), "the template should be commented out: {text}");
+        assert!(text.contains("# scripts = [\"db\", \"migrate\", \"api\"]"));
+
+        // It must still be valid, and parse as a project with no scripts —
+        // otherwise Scriptr would refuse to re-import what it just wrote.
+        let plan = plan_import(&id, &[], &[], &text, ImportMode::Merge).unwrap();
+        assert!(plan.upserts.is_empty() && plan.group_upserts.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file already at the root is never overwritten: it may be a teammate's,
+    /// with comments and an order worth keeping.
+    #[test]
+    fn an_existing_file_is_left_alone() {
+        let dir = tmp("existing");
+        let (db, id) = project_in(&dir);
+        let mine = "# hand written, do not touch\n";
+        std::fs::write(dir.join(FILE_NAME), mine).unwrap();
+
+        assert_eq!(export_if_absent(&db, &id).unwrap(), None, "it should report that it wrote nothing");
+        assert_eq!(std::fs::read_to_string(dir.join(FILE_NAME)).unwrap(), mine);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unwritable folder is reported, not a panic: adding the project still
+    /// has to succeed.
+    #[test]
+    fn an_unwritable_folder_is_an_error_not_a_panic() {
+        let dir = tmp("readonly");
+        let (db, id) = project_in(&dir);
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o500);
+        }
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        assert!(export_if_absent(&db, &id).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut back = std::fs::metadata(&dir).unwrap().permissions();
+            back.set_mode(0o700);
+            let _ = std::fs::set_permissions(&dir, back);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -91,6 +91,14 @@ pub async fn project_add(state: AppStateRef<'_>, input: AddProjectInput) -> Res<
         let _ = db.delete_project(&project.id);
         return Err(e);
     }
+    // Give the project a scriptr.toml straight away: it is the file a teammate
+    // reads, an AI client reads, and the project declares its scripts in. An
+    // unwritable folder is not a reason to refuse the project.
+    match config::export_if_absent(db, &project.id) {
+        Ok(Some(path)) => log::info!("wrote {}", path.display()),
+        Ok(None) => {}
+        Err(e) => log::warn!("could not write {}: {e}", config::FILE_NAME),
+    }
     state.sync_watcher();
     state.snapshot()
 }

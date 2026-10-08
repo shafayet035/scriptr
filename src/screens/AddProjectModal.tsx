@@ -28,7 +28,9 @@ export function AddProjectModal(props: { scan: ScanResult }) {
     });
 
   const count = () => selected().size;
-  const canAdd = () => !busy() && (importToml() || count() > 0);
+  // A project with no scripts is allowed: it still gets a scriptr.toml to
+  // declare them in, and they can be added later.
+  const canAdd = () => !busy();
 
   const add = async () => {
     if (!canAdd()) return;
@@ -127,7 +129,9 @@ export function AddProjectModal(props: { scan: ScanResult }) {
           <span class="t-caption-11 c-muted ellipsis" style={{ "white-space": "pre" }}>
             {importToml()
               ? "scriptr.toml will be imported  ·  you can rescan manifests later"
-              : `${count()} of ${all().length} selected  ·  commands, env and dependencies are editable after import`}
+              : count() === 0
+                ? "No scripts selected  ·  a scriptr.toml is written anyway, to declare them in later"
+                : `${count()} of ${all().length} selected  ·  a scriptr.toml is written at the project root`}
           </span>
           <div class="grow" />
           <button class="btn btn-secondary" style={{ padding: "9px 14px", "border-radius": "8px" }} onClick={cancelAddProject}>
