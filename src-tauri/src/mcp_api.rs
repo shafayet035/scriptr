@@ -260,7 +260,7 @@ struct Status {
     api_version: u32,
     projects: usize,
     running_scripts: usize,
-    working_tasks: usize,
+    cards_in_progress: usize,
 }
 
 async fn status(State(api): ApiState, headers: HeaderMap) -> ApiResult<Status> {
@@ -279,7 +279,7 @@ async fn status(State(api): ApiState, headers: HeaderMap) -> ApiResult<Status> {
         api_version: API_VERSION,
         projects: projects.len(),
         running_scripts: (api.hooks.running_scripts)(),
-        working_tasks: working,
+        cards_in_progress: working,
     }))
 }
 

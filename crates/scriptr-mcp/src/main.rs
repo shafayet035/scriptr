@@ -268,11 +268,11 @@ fn call_tool(name: &str, args: &Value) -> Value {
         "scriptr_status" => match request("GET", "/v1/status", None) {
             Call::Ok(v) => text_result(
                 format!(
-                    "Scriptr {} is running: {} projects, {} scripts up, {} agents working.",
+                    "Scriptr {} is running: {} projects, {} scripts up, {} cards in progress.",
                     v["version"].as_str().unwrap_or("?"),
                     v["projects"],
                     v["runningScripts"],
-                    v["workingTasks"]
+                    v["cardsInProgress"]
                 ),
                 false,
             ),
