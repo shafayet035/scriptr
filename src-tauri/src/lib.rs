@@ -17,6 +17,7 @@ pub mod stream;
 pub mod supervisor;
 pub mod tasks;
 mod watch;
+pub mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -255,6 +256,9 @@ pub fn run() {
             commands::task_write,
             commands::task_resize,
             commands::mcp_info,
+            commands::project_branches,
+            commands::task_workspace,
+            commands::task_workspace_discard,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Scriptr application")

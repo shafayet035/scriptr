@@ -109,7 +109,9 @@ Scriptr board instead of doing it yourself. Works even when Scriptr is closed.",
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "extra", "max", "ultracode"]},
                     "priority": {"type": "integer", "minimum": 0, "maximum": 3, "description": "0 none, 1 low, 2 medium, 3 high"},
                     "labels": {"type": "array", "items": {"type": "string"}},
-                    "issueUrl": {"type": "string"}
+                    "issueUrl": {"type": "string"},
+                    "workspace": {"type": "string", "enum": ["in-place", "worktree"], "description": "worktree gives the agent its own checkout on its own branch; in-place uses the project directory. Default in-place."},
+                    "base": {"type": "string", "description": "Branch the work is cut from and its PR will target, e.g. main or staging. Omit for whatever the repository is on."}
                 },
                 "required": ["project", "title", "goal"]
             },

@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     effort          TEXT,
     workspace       TEXT NOT NULL,
     branch          TEXT,
+    base_branch     TEXT,
     after           TEXT NOT NULL,
     verify          TEXT NOT NULL,
     status          TEXT NOT NULL,
@@ -203,6 +204,7 @@ impl Db {
         // `CREATE TABLE IF NOT EXISTS` leaves older databases untouched, so
         // columns added after a release are patched in here.
         Self::add_column(&conn, "tasks", "effort", "TEXT")?;
+        Self::add_column(&conn, "tasks", "base_branch", "TEXT")?;
         Ok(Self { conn: Mutex::new(conn), path })
     }
 
@@ -603,7 +605,7 @@ impl Db {
     // ---- tasks ----------------------------------------------------------
 
     const TASK_COLS: &'static str = "id, project_id, title, goal, agent_id, model, autonomy, effort, workspace, \
-         branch, status, priority, assignee, labels, issue_url, budget_tokens, \
+         branch, base_branch, status, priority, assignee, labels, issue_url, budget_tokens, \
          budget_seconds, created_at, updated_at, sort_order";
 
     fn task_from_row(r: &Row<'_>) -> rusqlite::Result<Task> {
@@ -618,18 +620,19 @@ impl Db {
             effort: opt_json(r, 7)?,
             workspace: json(r, 8)?,
             branch: r.get(9)?,
+            base_branch: r.get(10)?,
             after: Vec::new(),
             verify: Vec::new(),
-            status: json(r, 10)?,
-            priority: r.get(11)?,
-            assignee: r.get(12)?,
-            labels: json(r, 13)?,
-            issue_url: r.get(14)?,
-            budget_tokens: r.get(15)?,
-            budget_seconds: r.get(16)?,
-            created_at: r.get(17)?,
-            updated_at: r.get(18)?,
-            sort_order: r.get(19)?,
+            status: json(r, 11)?,
+            priority: r.get(12)?,
+            assignee: r.get(13)?,
+            labels: json(r, 14)?,
+            issue_url: r.get(15)?,
+            budget_tokens: r.get(16)?,
+            budget_seconds: r.get(17)?,
+            created_at: r.get(18)?,
+            updated_at: r.get(19)?,
+            sort_order: r.get(20)?,
         })
     }
 
@@ -671,7 +674,7 @@ impl Db {
         tx.execute(
             &format!(
                 "INSERT OR REPLACE INTO tasks ({}) VALUES \
-                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+                 (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
                 Self::TASK_COLS
             ),
             params![
@@ -685,6 +688,7 @@ impl Db {
                 t.effort.as_ref().map(to_json).transpose()?,
                 to_json(&t.workspace)?,
                 t.branch,
+                t.base_branch,
                 to_json(&t.status)?,
                 t.priority,
                 t.assignee,
@@ -784,7 +788,8 @@ mod tests {
     /// A database with one project, ready for scripts and tasks.
     fn seeded() -> Db {
         let db = Db::open_in_memory().unwrap();
-        db.insert_project(&Project { id: "p".into(), name: "p".into(), path: "/tmp".into(), branch: None, sort_order: 0 })
+        db.insert_project(&Project { id: "p".into(), name: "p".into(), path: "/tmp".into(), branch: None,
+        sort_order: 0 })
             .unwrap();
         db
     }
@@ -812,7 +817,8 @@ mod tests {
     #[test]
     fn crud_roundtrip_and_delete_scrubs_references() {
         let db = Db::open_in_memory().unwrap();
-        db.insert_project(&Project { id: "p".into(), name: "P".into(), path: "/tmp".into(), branch: None, sort_order: 0 })
+        db.insert_project(&Project { id: "p".into(), name: "P".into(), path: "/tmp".into(), branch: None,
+        sort_order: 0 })
             .unwrap();
         let a = sample_script("a", "p", "db");
         let mut b = sample_script("b", "p", "api");
@@ -854,6 +860,7 @@ mod tests {
             effort: Some(Effort::Extra),
             workspace: WorkspaceMode::InPlace,
             branch: Some("task/flaky".into()),
+            base_branch: Some("main".into()),
             after: vec![],
             verify: vec!["test".into()],
             status: TaskStatus::Backlog,
@@ -872,7 +879,8 @@ mod tests {
     #[test]
     fn tasks_round_trip_every_field() {
         let db = Db::open_in_memory().unwrap();
-        db.insert_project(&Project { id: "p".into(), name: "P".into(), path: "/tmp".into(), branch: None, sort_order: 0 })
+        db.insert_project(&Project { id: "p".into(), name: "P".into(), path: "/tmp".into(), branch: None,
+        sort_order: 0 })
             .unwrap();
         let a = sample_task("a");
         let mut b = sample_task("b");

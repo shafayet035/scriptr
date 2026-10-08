@@ -240,8 +240,10 @@ export interface Task {
   /** null = the agent's own default */
   effort: Effort | null;
   workspace: WorkspaceMode;
-  /** later (B): branch backing the worktree */
+  /** the worktree's branch, once one has been cut */
   branch: string | null;
+  /** branch the work is cut from, and later targeted by its PR */
+  baseBranch: string | null;
   /** later (D): task ids this task starts after — same scheduler as scripts */
   after: string[];
   /** later (C): script ids that must pass for the task to count as done */
@@ -302,4 +304,15 @@ export interface ImportReport {
   removed: number;
   /** unified-ish diff text when mode == preview */
   preview: string | null;
+}
+
+/** A task's isolated checkout, from the `task_workspace` command. */
+export interface WorkspaceInfo {
+  path: string;
+  branch: string;
+  base: string;
+  /** commits on the task's branch the base does not have */
+  ahead: number;
+  /** files changed but not committed */
+  dirty: number;
 }

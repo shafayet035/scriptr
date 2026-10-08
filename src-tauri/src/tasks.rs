@@ -6,10 +6,10 @@
 //!                  → cancelled (you stopped it)
 //! ```
 //!
-//! Slice A keeps this deliberately thin: the agent works in the project
-//! directory, Scriptr never commits or pushes, and the agent's own permission
-//! prompts are hosted in the PTY rather than bypassed. Worktrees (B) and
-//! verification (C) hang off the same record — see `docs/AI-PM.md`.
+//! A task either works in the project directory or, with
+//! `WorkspaceMode::Worktree`, in its own checkout on its own branch (B1 — see
+//! `docs/REVIEW-LOOP.md`). Scriptr still never commits or pushes, and the
+//! agent's own permission prompts are hosted in the PTY rather than bypassed.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,6 +23,7 @@ use crate::model::{now_ms, AgentAdapter, RunState, Task, TaskRun, TaskStatus, Wo
 use crate::pty::{self, DataSink, ProcessGroup, RunKey, SpawnSpec, Terminal, Terminals};
 use crate::stream::StreamParser;
 use crate::supervisor::{EventSink, STOP_GRACE};
+use crate::worktree;
 
 /// How long to wait for trailing output after the agent exits.
 const DRAIN_WAIT: Duration = Duration::from_millis(250);
@@ -48,6 +49,12 @@ pub struct NewTask {
     pub labels: Vec<String>,
     #[serde(default)]
     pub issue_url: Option<String>,
+    /// "in-place" or "worktree". Omitted = the project's checkout.
+    #[serde(default)]
+    pub workspace: Option<crate::model::WorkspaceMode>,
+    /// Branch the work is cut from. Omitted = whatever the repo is on.
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 /// Creates a backlog task. `origin` records who filed it ("mcp", "mcp-offline").
@@ -89,8 +96,9 @@ pub fn create(db: &Db, project_id: &str, input: &NewTask, origin: &str) -> Resul
         model: input.model.clone(),
         autonomy: crate::model::Autonomy::Ask,
         effort: input.effort,
-        workspace: WorkspaceMode::InPlace,
+        workspace: input.workspace.unwrap_or(WorkspaceMode::InPlace),
         branch: None,
+        base_branch: input.base.as_deref().map(str::trim).filter(|b| !b.is_empty()).map(str::to_string),
         after: vec![],
         verify: vec![],
         status: TaskStatus::Backlog,
@@ -201,14 +209,45 @@ impl TaskRunner {
         if self.is_running(task_id) {
             return Err(format!("“{}” is already running", task.title));
         }
-        if task.workspace != WorkspaceMode::InPlace {
-            return Err("worktree isolation isn't implemented yet — set the task to run in place".into());
-        }
         let project = self.db.project(&task.project_id)?;
-        let cwd = PathBuf::from(&project.path);
-        if !cwd.is_dir() {
+        let repo = PathBuf::from(&project.path);
+        if !repo.is_dir() {
             return Err(format!("{} no longer exists", project.path));
         }
+        // An isolated task works on its own branch in its own checkout, so two
+        // agents never share a tree and neither disturbs the one you have open.
+        let cwd = match task.workspace {
+            WorkspaceMode::InPlace => repo.clone(),
+            WorkspaceMode::Worktree => {
+                let (id, title, base) = (task.id.clone(), task.title.clone(), task.base_branch.clone());
+                let dir = repo.clone();
+                let wt = tokio::task::spawn_blocking(move || {
+                    worktree::ensure(&dir, &id, &title, base.as_deref())
+                })
+                .await
+                .map_err(|e| format!("worktree setup panicked: {e}"))??;
+                // Record the branch before anything runs: if the agent crashes,
+                // the work is still findable.
+                if task.branch.as_deref() != Some(wt.branch.as_str()) {
+                    task.branch = Some(wt.branch.clone());
+                    task.updated_at = now_ms();
+                    let _ = self.db.upsert_task(&task);
+                }
+                let terminal = self.terminal(task_id);
+                terminal.write(&notice(&format!(
+                    "{} {} · {}",
+                    if wt.created { "worktree" } else { "reusing worktree" },
+                    wt.branch,
+                    wt.path.display(),
+                )));
+                if wt.created {
+                    terminal.write(&notice(
+                        "a fresh checkout has no node_modules, .venv or .env —                          install dependencies in the goal if the agent needs them",
+                    ));
+                }
+                wt.path
+            }
+        };
         let adapter = self.adapter_for(&task, &cwd).await?;
 
         // Some levels are a prompt keyword rather than a flag (ultracode).

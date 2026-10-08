@@ -135,10 +135,24 @@ remembered to click.
 
 In dependency order. Each slice is useful alone, which is the point.
 
-**B1 — worktree per task.** `WorkspaceMode::Worktree` stops being a refusal.
+**B1 — worktree per task. Built.** `WorkspaceMode::Worktree` stops being a refusal.
 `git worktree add` under a Scriptr-owned directory, branch named from the task
-(`scriptr/<short-id>-<slug>`), removed when the task is done or cancelled.
-Unlocks concurrency: two agents stop fighting over one checkout.
+(`scriptr/<short-id>-<slug>`), and removal is always
+deliberate — see below. Unlocks concurrency: two agents stop fighting over one
+checkout.
+
+Removal is never automatic, which is a change from the first sketch of this
+plan. Nothing has pushed the agent's work anywhere yet, so an automatic
+teardown on cancel or on `done` would be silent data loss. Discarding is a menu
+item that refuses while the checkout is dirty, and says how many files it would
+destroy before asking again. Deleting the task tries the same gentle removal
+and, when it is refused, keeps the checkout and logs where it is.
+
+What B1 does not do: **dependencies are not carried into the worktree.** A fresh
+checkout has no `node_modules`, no `.venv`, no untracked `.env`, so an agent
+whose task needs them has to install them — the composer says so, and the
+terminal repeats it on the first run. Linking or copying a configured list of
+ignored paths is the obvious follow-up.
 
 **B2 — publish.** Commit anything the agent left uncommitted, push, open the PR
 against `base_branch` with a body built from the goal and the gate results.

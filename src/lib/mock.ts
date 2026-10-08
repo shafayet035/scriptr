@@ -125,7 +125,7 @@ export function createMockBackend(): Backend {
   ];
 
   const mkTask = (p: Partial<Task> & Pick<Task, "id" | "projectId" | "title" | "goal" | "agentId">): Task => ({
-    model: null, autonomy: "ask", effort: null, workspace: "in-place", branch: null, after: [], verify: [], status: "backlog",
+    model: null, autonomy: "ask", effort: null, workspace: "in-place", branch: null, baseBranch: null, after: [], verify: [], status: "backlog",
     priority: 1, assignee: null, labels: [], issueUrl: null, budgetTokens: null, budgetSeconds: null,
     createdAt: t0 - 86_400_000, updatedAt: t0 - 3_600_000, sortOrder: 0, ...p,
   });
@@ -538,6 +538,19 @@ export function createMockBackend(): Backend {
       taskRuns.delete(taskId);
     },
     taskRuns: async (taskId) => structuredClone(taskRuns.get(taskId) ?? []),
+    projectBranches: async () => ["main", "staging", "develop"],
+    taskWorkspace: async (taskId) => {
+      const t = taskOf(taskId);
+      if (t.workspace !== "worktree" || !t.branch) return null;
+      return {
+        path: `/Users/you/Library/Application Support/scriptr/worktrees/${taskId}`,
+        branch: t.branch,
+        base: t.baseBranch ?? "main",
+        ahead: 2,
+        dirty: 3,
+      };
+    },
+    taskWorkspaceDiscard: async () => {},
     taskStart: async (taskId) => {
       const t = taskOf(taskId);
       const a = agents.find((x) => x.id === t.agentId);

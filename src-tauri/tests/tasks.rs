@@ -49,6 +49,19 @@ interactive_args = ["-c", "{prompt}"]
     dir
 }
 
+/// Turns a project folder into a git repository with one commit on `main`,
+/// so worktree tasks have something to branch from.
+fn git_init(dir: &PathBuf) {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git").args(args).current_dir(dir).output().unwrap();
+    };
+    run(&["init", "--initial-branch=main"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "Test"]);
+    run(&["add", "-A"]);
+    run(&["commit", "-m", "first"]);
+}
+
 fn task(goal: &str) -> Task {
     Task {
         id: "t1".into(),
@@ -61,6 +74,7 @@ fn task(goal: &str) -> Task {
         effort: None,
         workspace: WorkspaceMode::InPlace,
         branch: None,
+        base_branch: None,
         after: vec![],
         verify: vec![],
         status: TaskStatus::Backlog,
@@ -224,5 +238,56 @@ async fn an_unknown_agent_is_refused_before_anything_spawns() {
 
     let err = h.runner.start("t1").await.unwrap_err();
     assert!(err.contains("unknown agent"), "unhelpful error: {err}");
+    assert_eq!(h.status(), TaskStatus::Backlog, "a refused start must not move the task");
+}
+
+/// B1: an isolated task runs in its own checkout on its own branch, and the
+/// project's own tree is left exactly as it was.
+#[tokio::test]
+async fn a_worktree_task_runs_on_its_own_branch() {
+    let mut t = task("pwd > where.txt; git rev-parse --abbrev-ref HEAD >> where.txt");
+    t.workspace = WorkspaceMode::Worktree;
+    let h = setup("worktree", t);
+    let project = PathBuf::from(h.db.project("p").unwrap().path);
+    git_init(&project);
+
+    h.runner.start("t1").await.unwrap();
+    assert_eq!(h.wait_for(TaskStatus::Review, Duration::from_secs(10)).await, TaskStatus::Review);
+
+    // The branch is on the record, so the work is findable after a crash.
+    let branch = h.db.task("t1").unwrap().branch.expect("the branch is recorded");
+    assert!(branch.starts_with("scriptr/"), "{branch}");
+
+    // The agent's own view of where it was: not the project directory.
+    let wt = scriptr_lib::worktree::path_for("t1").unwrap();
+    let saw = std::fs::read_to_string(wt.join("where.txt")).expect("the agent wrote inside the worktree");
+    let mut lines = saw.lines();
+    let cwd = std::fs::canonicalize(lines.next().unwrap()).unwrap();
+    assert_eq!(cwd, std::fs::canonicalize(&wt).unwrap(), "the agent ran in the worktree");
+    assert_eq!(lines.next().unwrap(), branch, "…and on the task's branch");
+
+    // The checkout you have open is untouched, still on main.
+    assert!(!project.join("where.txt").exists(), "the project tree was written to");
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "main");
+    assert!(h.text().contains("worktree"), "the notice should name the workspace: {}", h.text());
+
+    scriptr_lib::worktree::remove(&project, "t1", true).unwrap();
+}
+
+/// A task asking for isolation in a folder that is not a repository must say so
+/// rather than quietly running in place.
+#[tokio::test]
+async fn a_worktree_task_without_a_repository_is_refused() {
+    let mut t = task("echo nope");
+    t.workspace = WorkspaceMode::Worktree;
+    let h = setup("norepo", t);
+
+    let err = h.runner.start("t1").await.unwrap_err();
+    assert!(err.contains("not a git repository"), "{err}");
     assert_eq!(h.status(), TaskStatus::Backlog, "a refused start must not move the task");
 }

@@ -1,7 +1,7 @@
 import { createEffect, createRoot, createSignal } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
 import { computePlan } from "../lib/graph";
-import { backend, initBackend, pickFolder, pickSavePath, pickTomlFile } from "../lib/ipc";
+import { backend, confirmAction, initBackend, pickFolder, pickSavePath, pickTomlFile } from "../lib/ipc";
 import { isLive } from "../lib/format";
 import { isTaskKey, taskIdOf, taskKey } from "../lib/terminals";
 import type {
@@ -572,6 +572,29 @@ export async function deleteTask(taskId: string) {
 
 export const setTaskStatus = (t: Task, status: Task["status"]) => saveTask({ ...t, status });
 
+/** The task's isolated checkout, or null when it has none. */
+export const taskWorkspace = (taskId: string) => backend.taskWorkspace(taskId);
+
+/**
+ * Throws the task's checkout away. Tries gently first: the backend refuses
+ * while work is uncommitted, and only then is the user asked to confirm —
+ * so the warning names what would actually be lost.
+ */
+export async function discardWorkspace(taskId: string) {
+  try {
+    await backend.taskWorkspaceDiscard(taskId, false);
+    toast("Workspace discarded", "info");
+  } catch (e) {
+    const why = errText(e);
+    if (!why.includes("uncommitted")) return toast(why, "error");
+    const ok = await confirmAction(`${why}.\n\nDiscard it anyway?`, "Discard");
+    if (!ok) return;
+    if (await attempt(backend.taskWorkspaceDiscard(taskId, true)) !== undefined) {
+      toast("Workspace discarded", "info");
+    }
+  }
+}
+
 /** `""` composes a new task; a task id edits that one. */
 export const openComposer = (taskId: string | "" = "") => setState("ui", "composerTaskId", taskId);
 export const closeComposer = () => setState("ui", "composerTaskId", null);
@@ -580,7 +603,7 @@ export function newTaskDraft(projectId: string): Task {
   const preferred = state.agents.find((a) => a.available) ?? state.agents[0];
   return {
     id: "", projectId, title: "", goal: "", agentId: preferred?.id ?? "", model: null,
-    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, after: [], verify: [],
+    autonomy: "ask" as Autonomy, effort: null, workspace: "in-place", branch: null, baseBranch: null, after: [], verify: [],
     status: "backlog", priority: 1, assignee: preferred ? `agent:${preferred.id}` : null, labels: [],
     issueUrl: null, budgetTokens: null, budgetSeconds: null,
     createdAt: Date.now(), updatedAt: Date.now(), sortOrder: tasksOf(projectId).length,

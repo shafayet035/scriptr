@@ -2,6 +2,7 @@ import type { MenuEntry } from "../../lib/menu";
 import type { Task } from "../../lib/types";
 import {
   deleteTask,
+  discardWorkspace,
   openComposer,
   openTask,
   setTaskStatus,
@@ -26,6 +27,11 @@ export function taskMenu(t: Task): MenuEntry[] {
     { label: "Mark as done", enabled: t.status !== "done", action: () => void setTaskStatus(t, "done") },
     { label: "Move to backlog", enabled: t.status !== "backlog", action: () => void setTaskStatus(t, "backlog") },
     { separator: true },
+    {
+      label: "Discard workspace…",
+      enabled: t.workspace === "worktree" && !!t.branch && !isWorking(t),
+      action: () => void discardWorkspace(t.id),
+    },
     { label: "Delete", action: () => void deleteTask(t.id) },
   ];
 }

@@ -13,6 +13,7 @@ import type {
   RunRecord,
   ScanResult,
   Script,
+  WorkspaceInfo,
   Settings,
   Snapshot,
   Task,
@@ -68,6 +69,11 @@ export interface Backend {
   taskStart(taskId: string): Promise<void>;
   taskStop(taskId: string): Promise<void>;
   taskRuns(taskId: string): Promise<TaskRun[]>;
+  /** branches in the project's repository, for a base-branch picker */
+  projectBranches(projectId: string): Promise<string[]>;
+  /** a task's isolated checkout, or null when it has none (B1) */
+  taskWorkspace(taskId: string): Promise<WorkspaceInfo | null>;
+  taskWorkspaceDiscard(taskId: string, force: boolean): Promise<void>;
   taskAttach(taskId: string, onData: (bytes: Uint8Array) => void): Promise<void>;
   taskWrite(taskId: string, data: string): Promise<void>;
   taskResize(taskId: string, cols: number, rows: number): Promise<void>;
@@ -120,6 +126,9 @@ const tauriBackend: Backend = {
   taskStart: (taskId) => invoke("task_start", { taskId }),
   taskStop: (taskId) => invoke("task_stop", { taskId }),
   taskRuns: (taskId) => invoke("task_runs", { taskId }),
+  projectBranches: (projectId) => invoke("project_branches", { projectId }),
+  taskWorkspace: (taskId) => invoke("task_workspace", { taskId }),
+  taskWorkspaceDiscard: (taskId, force) => invoke("task_workspace_discard", { taskId, force }),
   taskAttach: (taskId, onData) => {
     const onDataChannel = new Channel<unknown>();
     onDataChannel.onmessage = (msg) => onData(toBytes(msg));
@@ -160,6 +169,12 @@ export async function pickSavePath(defaultPath: string): Promise<string | null> 
   if (!isTauri) return defaultPath;
   const { save } = await import("@tauri-apps/plugin-dialog");
   return save({ defaultPath });
+}
+
+/** Native yes/no. `kind: "warning"` for anything that destroys work. */
+export async function confirmAction(message: string, confirmLabel: string, title = "Scriptr"): Promise<boolean> {
+  const { confirm } = await import("@tauri-apps/plugin-dialog");
+  return confirm(message, { title, kind: "warning", okLabel: confirmLabel, cancelLabel: "Cancel" });
 }
 
 export async function revealInFinder(path: string): Promise<void> {

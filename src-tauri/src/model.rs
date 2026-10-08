@@ -466,8 +466,11 @@ pub struct Task {
     #[serde(default)]
     pub effort: Option<Effort>,
     pub workspace: WorkspaceMode,
-    /// later (B): branch backing the worktree
+    /// the worktree's branch, once one has been cut
     pub branch: Option<String>,
+    /// branch the work is cut from, and later targeted by its PR.
+    /// None = the repository's current branch when the task starts.
+    pub base_branch: Option<String>,
     /// later (D): task ids this task starts after
     pub after: Vec<String>,
     /// later (C): script ids that must pass for the task to count as done

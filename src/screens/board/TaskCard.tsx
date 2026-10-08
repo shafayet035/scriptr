@@ -90,9 +90,10 @@ export function TaskCard(props: { task: Task }) {
       <Show when={t().labels.length > 0 || t().branch}>
         <div class="tc-chips">
           <Show when={t().branch}>
-            <span class="tc-chip">
+            {/* The `scriptr/` prefix is on every one of them; the title is the news. */}
+            <span class="tc-chip" title={t().branch!}>
               <Icon name="branch" size={10} />
-              {t().branch}
+              {t().branch!.replace(/^scriptr\//, "")}
             </span>
           </Show>
           {t().labels.map((l) => (

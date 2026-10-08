@@ -13,7 +13,7 @@ use crate::model::{
     now_ms, AddProjectInput, AgentAdapter, Group, HistoryEntry, ImportMode, ImportReport, Plan, Project,
     RestartPolicy, ScanResult, Script, Settings, Snapshot, Task, TaskRun, TaskStatus,
 };
-use crate::{agents, config, detect, graph, supervisor, AppState};
+use crate::{agents, config, detect, graph, supervisor, worktree, AppState};
 
 type Res<T> = Result<T, String>;
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -293,7 +293,99 @@ pub async fn task_save(state: AppStateRef<'_>, task: Task) -> Res<Task> {
 #[tauri::command]
 pub async fn task_delete(state: AppStateRef<'_>, task_id: String) -> Res<()> {
     let _ = state.tasks.stop(&task_id).await;
+    // Deleting the record must not leave an orphaned checkout behind, but it
+    // must also not silently destroy work: a dirty worktree outlives the task
+    // and is reported so it can be dealt with deliberately.
+    if let Ok(task) = state.db.task(&task_id) {
+        if task.workspace == crate::model::WorkspaceMode::Worktree {
+            if let Ok(project) = state.db.project(&task.project_id) {
+                let dir = std::path::PathBuf::from(project.path);
+                let id = task_id.clone();
+                if let Ok(Err(e)) =
+                    tokio::task::spawn_blocking(move || worktree::remove(&dir, &id, false)).await
+                {
+                    log::warn!("kept the workspace for deleted task {task_id}: {e}");
+                }
+            }
+        }
+    }
     state.db.delete_task(&task_id)
+}
+
+/// A task's isolated checkout, as the inspector shows it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceInfo {
+    pub path: String,
+    pub branch: String,
+    pub base: String,
+    /// Commits on the task's branch that the base does not have.
+    pub ahead: usize,
+    /// Files changed but not committed.
+    pub dirty: usize,
+}
+
+/// Branches in the project's repository, for a base-branch picker.
+#[tauri::command]
+pub async fn project_branches(state: AppStateRef<'_>, project_id: String) -> Res<Vec<String>> {
+    let project = state.db.project(&project_id)?;
+    let dir = std::path::PathBuf::from(project.path);
+    tokio::task::spawn_blocking(move || worktree::branches(&dir))
+        .await
+        .map_err(|e| format!("listing branches panicked: {e}"))?
+}
+
+/// What a task's isolated checkout looks like right now: where it is, what is
+/// uncommitted, how far ahead of its base. None when it has no worktree.
+#[tauri::command]
+pub async fn task_workspace(state: AppStateRef<'_>, task_id: String) -> Res<Option<WorkspaceInfo>> {
+    let task = state.db.task(&task_id)?;
+    if task.workspace != crate::model::WorkspaceMode::Worktree {
+        return Ok(None);
+    }
+    let base = match task.base_branch.clone() {
+        Some(b) => b,
+        None => {
+            let project = state.db.project(&task.project_id)?;
+            let dir = std::path::PathBuf::from(project.path);
+            tokio::task::spawn_blocking(move || worktree::current_branch(&dir))
+                .await
+                .map_err(|e| format!("reading the branch panicked: {e}"))?
+                .unwrap_or_else(|_| "HEAD".into())
+        }
+    };
+    let path = worktree::path_for(&task_id)?;
+    if !path.join(".git").exists() {
+        return Ok(None);
+    }
+    let branch = task.branch.unwrap_or_else(|| worktree::branch_name(&task_id, &task.title));
+    tokio::task::spawn_blocking(move || {
+        let dirty = worktree::dirty(&path);
+        Some(WorkspaceInfo {
+            path: path.to_string_lossy().into_owned(),
+            branch,
+            ahead: worktree::commits_ahead(&path, &base),
+            dirty: dirty.len(),
+            base,
+        })
+    })
+    .await
+    .map_err(|e| format!("reading the workspace panicked: {e}"))
+}
+
+/// Discards a task's checkout. `force` is required while work is uncommitted.
+#[tauri::command]
+pub async fn task_workspace_discard(state: AppStateRef<'_>, task_id: String, force: bool) -> Res<()> {
+    let task = state.db.task(&task_id)?;
+    if state.tasks.is_running(&task_id) {
+        return Err("stop the agent before discarding its workspace".into());
+    }
+    let project = state.db.project(&task.project_id)?;
+    let dir = std::path::PathBuf::from(project.path);
+    let id = task_id.clone();
+    tokio::task::spawn_blocking(move || worktree::remove(&dir, &id, force))
+        .await
+        .map_err(|e| format!("discarding the workspace panicked: {e}"))?
 }
 
 #[tauri::command]

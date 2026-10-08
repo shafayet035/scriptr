@@ -1,9 +1,10 @@
-import { createMemo, For, onCleanup, onMount, Show } from "solid-js";
+import { createMemo, createResource, For, onCleanup, onMount, Show } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import { Icon } from "../components/Icon";
 import { popupMenu } from "../lib/menu";
 import { AUTONOMY_LABEL, PRIORITY_LABEL, tildify } from "../lib/format";
-import type { Autonomy, Task } from "../lib/types";
+import type { Autonomy, Task, WorkspaceMode } from "../lib/types";
+import { backend } from "../lib/ipc";
 import { agent, closeComposer, currentProject, newTaskDraft, openComposer, saveTask, startTask, state, task } from "../store/app";
 
 const AUTONOMY: Autonomy[] = ["ask", "auto-edit", "full"];
@@ -46,6 +47,26 @@ export function TaskComposer(props: { taskId: string }) {
   const priorityMenu = (e: MouseEvent) =>
     popupMenu(
       PRIORITY_LABEL.map((label, i) => ({ label, checked: draft.priority === i, action: () => setDraft("priority", i) })),
+      e.currentTarget as HTMLElement,
+    );
+
+  // Only fetched once the task is actually isolated: a plain in-place task has
+  // no use for a base, and the project may not even be a repository.
+  const [branches] = createResource(
+    () => (draft.workspace === "worktree" ? project().id : undefined),
+    (id) => backend.projectBranches(id).catch(() => [] as string[]),
+  );
+
+  const baseMenu = (e: MouseEvent) =>
+    popupMenu(
+      [
+        { label: "Current branch", checked: !draft.baseBranch, action: () => setDraft("baseBranch", null) },
+        ...(branches() ?? []).map((b) => ({
+          label: b,
+          checked: draft.baseBranch === b,
+          action: () => setDraft("baseBranch", b),
+        })),
+      ],
       e.currentTarget as HTMLElement,
     );
 
@@ -149,6 +170,33 @@ export function TaskComposer(props: { taskId: string }) {
                 : draft.autonomy === "auto-edit"
                   ? "File edits are accepted automatically; shell commands still ask."
                   : "The agent runs without asking. Use it only on work you can throw away."}
+            </p>
+          </div>
+
+          <div class="field">
+            <span class="field-label">Workspace</span>
+            <div class="composer-row">
+              <div class="seg bordered">
+                <For each={["in-place", "worktree"] as WorkspaceMode[]}>
+                  {(w) => (
+                    <button class="seg-opt" aria-pressed={draft.workspace === w} onClick={() => setDraft("workspace", w)}>
+                      {w === "in-place" ? "In place" : "Own branch"}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <Show when={draft.workspace === "worktree"}>
+                <button class="select grow" onClick={baseMenu}>
+                  {draft.baseBranch ?? "Current branch"}
+                  <div class="grow" />
+                  <Icon name="chevron-down" size={12} color="var(--text-muted)" />
+                </button>
+              </Show>
+            </div>
+            <p class="t-caption-11 c-muted">
+              {draft.workspace === "in-place"
+                ? "The agent edits the project directory you have open."
+                : `A git worktree on its own branch, cut from ${draft.baseBranch ?? "the current branch"}. Dependencies are not copied — a fresh checkout has no node_modules or .venv.`}
             </p>
           </div>
 
