@@ -159,12 +159,9 @@ impl Db {
         conn.execute_batch(SCHEMA).map_err(err)?;
         Self::migrate_links(&mut conn)?;
         Self::migrate_board(&mut conn)?;
-        // `CREATE TABLE IF NOT EXISTS` leaves older databases untouched, so
-        // columns added after a release are patched in here.
-        Self::add_column(&conn, "tasks", "effort", "TEXT")?;
-        Self::add_column(&conn, "tasks", "base_branch", "TEXT")?;
-        Self::add_column(&conn, "tasks", "pr_url", "TEXT")?;
-        Self::add_column(&conn, "tasks", "pr_number", "INTEGER")?;
+        // Any patch-up for a newly added column goes here — after the
+        // migrations, never before, or a column a migration just dropped comes
+        // straight back.
         Ok(Self { conn: Mutex::new(conn), path })
     }
 
@@ -235,18 +232,21 @@ CREATE TABLE tasks_new (
     updated_at      INTEGER NOT NULL,
     sort_order      INTEGER NOT NULL DEFAULT 0
 );
+-- Enum columns hold JSON, so the values carry their quotes: comparing
+-- against a bare 'queued' matches nothing and silently backlogs the board.
 INSERT INTO tasks_new
 SELECT id, project_id, title, goal,
        CASE status
-         WHEN 'queued'     THEN 'todo'
-         WHEN 'working'    THEN 'doing'
-         WHEN 'verifying'  THEN 'doing'
-         WHEN 'publishing' THEN 'doing'
-         WHEN 'failed'     THEN 'backlog'
-         WHEN 'cancelled'  THEN 'backlog'
-         WHEN 'review'     THEN 'review'
-         WHEN 'done'       THEN 'done'
-         ELSE 'backlog'
+         WHEN '"queued"'     THEN '"todo"'
+         WHEN '"working"'    THEN '"doing"'
+         WHEN '"verifying"'  THEN '"doing"'
+         WHEN '"publishing"' THEN '"doing"'
+         WHEN '"failed"'     THEN '"backlog"'
+         WHEN '"cancelled"'  THEN '"backlog"'
+         WHEN '"review"'     THEN '"review"'
+         WHEN '"done"'       THEN '"done"'
+         WHEN '"backlog"'    THEN '"backlog"'
+         ELSE '"backlog"'
        END,
        priority, assignee, labels, issue_url, created_at, updated_at, sort_order
 FROM tasks;
@@ -302,17 +302,6 @@ DROP TABLE IF EXISTS task_verify;
         Ok(())
     }
 
-    /// Adds a column when it isn't there yet. Probing beats matching on the
-    /// "duplicate column name" error text, and needs no version counter.
-    fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> DbResult<()> {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).map_err(err)?;
-        let existing: Vec<String> =
-            stmt.query_map([], |r| r.get::<_, String>(1)).map_err(err)?.collect::<Result<_, _>>().map_err(err)?;
-        if existing.iter().any(|c| c == column) {
-            return Ok(());
-        }
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), []).map(drop).map_err(err)
-    }
 
     pub fn path(&self) -> &Path {
         &self.path
@@ -658,6 +647,11 @@ DROP TABLE IF EXISTS task_verify;
         Ok(tasks)
     }
 
+    /// Every card, across projects.
+    pub fn tasks(&self) -> DbResult<Vec<Task>> {
+        self.query_tasks("", None)
+    }
+
     pub fn project_tasks(&self, project_id: &str) -> DbResult<Vec<Task>> {
         self.query_tasks("WHERE project_id = ?1", Some(project_id))
     }
@@ -908,6 +902,67 @@ mod tests {
         let mut ghost = sample_task("t3");
         ghost.after = vec!["nope".into()];
         assert!(db.upsert_task(&ghost).is_err());
+    }
+
+    /// The agent era's tasks become cards, and the columns it needed are gone.
+    #[test]
+    fn the_migration_turns_agent_tasks_into_board_cards() {
+        let path = std::env::temp_dir().join(format!("scriptr-board-mig-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        // The shape before this change. Status is an enum column, so the values
+        // carry their JSON quotes — the thing that made the first attempt wrong.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL, branch TEXT, sort_order INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL, goal TEXT NOT NULL,
+                agent_id TEXT NOT NULL, model TEXT, autonomy TEXT NOT NULL, workspace TEXT NOT NULL, branch TEXT,
+                base_branch TEXT, pr_url TEXT, pr_number INTEGER, status TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
+                assignee TEXT, labels TEXT NOT NULL, issue_url TEXT, budget_tokens INTEGER, budget_seconds INTEGER,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0, effort TEXT);
+            CREATE TABLE task_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL);
+            INSERT INTO projects VALUES ('p','p','/tmp',NULL,0);
+            INSERT INTO tasks VALUES ('a','p','Queued one','g','claude-code',NULL,'"ask"','"in-place"',NULL,NULL,NULL,NULL,'"queued"',1,NULL,'[]',NULL,NULL,NULL,1,2,0,NULL);
+            INSERT INTO tasks VALUES ('b','p','Working one','g','claude-code',NULL,'"ask"','"in-place"',NULL,NULL,NULL,NULL,'"working"',2,NULL,'[]',NULL,NULL,NULL,1,2,1,NULL);
+            INSERT INTO tasks VALUES ('c','p','Failed one','g','claude-code',NULL,'"ask"','"in-place"',NULL,NULL,NULL,NULL,'"failed"',3,NULL,'[]',NULL,NULL,NULL,1,2,2,NULL);
+            INSERT INTO tasks VALUES ('d','p','Done one','g','claude-code',NULL,'"ask"','"in-place"',NULL,NULL,NULL,NULL,'"done"',0,NULL,'[]',NULL,NULL,NULL,1,2,3,NULL);
+            INSERT INTO tasks VALUES ('e','p','Publishing one','g','claude-code',NULL,'"ask"','"in-place"',NULL,NULL,NULL,NULL,'"publishing"',1,NULL,'[]',NULL,NULL,NULL,1,2,4,NULL);
+            INSERT INTO task_runs VALUES ('r','a','"stopped"');
+        "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(&path).unwrap();
+        let by_id = |id: &str| db.task(id).unwrap();
+        // The runner's phases map onto the board's columns.
+        assert_eq!(by_id("a").status, TaskStatus::Todo, "queued is groomed work");
+        assert_eq!(by_id("b").status, TaskStatus::Doing);
+        assert_eq!(by_id("e").status, TaskStatus::Doing, "publishing was still in flight");
+        assert_eq!(by_id("c").status, TaskStatus::Backlog, "a failed run is work still to do");
+        assert_eq!(by_id("d").status, TaskStatus::Done);
+        // Nothing else about the card is disturbed.
+        assert_eq!(by_id("c").title, "Failed one");
+        assert_eq!(by_id("c").priority, 3);
+        assert_eq!(db.tasks().unwrap().len(), 5);
+
+        // The agent-era columns and tables are gone, and stay gone.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for column in ["agent_id", "autonomy", "workspace", "pr_url", "effort"] {
+            assert!(!Db::has_column(&conn, "tasks", column).unwrap(), "tasks.{column} survived");
+        }
+        let runs: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name='task_runs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(runs, 0, "task_runs survived");
+        drop(conn);
+
+        // Re-opening is a no-op rather than a second migration.
+        drop(db);
+        let again = Db::open(&path).unwrap();
+        assert_eq!(again.tasks().unwrap().len(), 5);
+        assert_eq!(again.task("a").unwrap().status, TaskStatus::Todo);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// An older database keeps its relationships and loses the JSON columns.
