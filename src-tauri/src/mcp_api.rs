@@ -445,7 +445,8 @@ async fn start_task(
     if !(api.hooks.agent_control)() {
         return Err((
             StatusCode::FORBIDDEN,
-            "starting agent runs from outside is off — turn on \"Let agents start runs\" in Scriptr's              Settings, or press Run on the board"
+            "starting agent runs from outside is off — turn on \"Let agents start runs\" in \
+             Scriptr's Settings, or press Run on the board"
                 .into(),
         ));
     }
